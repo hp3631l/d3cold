@@ -1,0 +1,175 @@
+# dGPU Sleep Doctor (`dgpu-doctor`) 🩺⚡
+
+[![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](https://opensource.org/licenses/MIT)
+[![Platform](https://img.shields.io/badge/Platform-Linux%20%7C%20Wayland%20%7C%20X11-purple.svg)]()
+[![Hardware](https://img.shields.io/badge/Hardware-NVIDIA%20Optimus%20%2F%20PRIME-green.svg)]()
+
+> **Diagnostic, auto-remediation, and zero-wake real-time monitoring engine for NVIDIA hybrid graphics on Linux & Wayland.**  
+> Eliminates phantom 20W–30W idle battery drain and ensures your discrete GPU reliably hits **0.0W in `D3cold`**.
+
+---
+
+## ⚡ The Problem: Why Your Hybrid Laptop Drains 25W–30W at Idle
+
+On modern Linux systems (especially Wayland compositors like Hyprland/Sway), hybrid laptop users frequently experience severe battery drain (20W–35W) even when the system is completely idle with only one or two terminals open.
+
+When functioning properly, a discrete NVIDIA GPU (RTX 20/30/40 series) should enter **PCI-Express Runtime D3 (`D3cold`)**, severing power rails completely to draw **0.0W**.
+
+However, reaching and maintaining `D3cold` is blocked by a **cascading 5-layer failure chain**:
+
+```mermaid
+flowchart TD
+    subgraph Failures ["The 5 Failure Layers"]
+        L1["1. Compositor EGL Probes<br/>libglvnd scans all vendors and opens persistent /dev/nvidia0 fds"]
+        L2["2. Audio Controller Multifunction Trap<br/>WirePlumber binds 0000:xx:00.1; ALSA blocks hardware D3cold"]
+        L3["3. Missing Kernel RTD3 Udev Rules<br/>power/control defaults to 'on' instead of 'auto'"]
+        L4["4. Background Status Bar Polling Loops<br/>Scripts poll nvidia-smi, lspci, or read DRM HDMI status every 2s"]
+        L5["5. Terminal System Monitors<br/>btop queries NVML PCIe throughput every 500ms"]
+    end
+
+    L1 --> Stuck["Result: NVIDIA GPU stuck in D0/P8 at 15W<br/>Intel CPU package blocked from C8/C10 (+10W)<br/>Total Idle Drain: 28W–32W"]
+    L2 --> Stuck
+    L3 --> Stuck
+    L4 --> Stuck
+    L5 --> Stuck
+```
+
+**`dgpu-doctor` solves this entire chain.**
+
+---
+
+## 🚀 Features
+
+- **🔍 5-Layer Deep Audit (`dgpu-doctor audit`)**:
+  - Checks live PCI power states (`runtime_status`, `control`, `D3cold`).
+  - Audits NVIDIA multifunction audio controller unbind state.
+  - Verifies `/etc/udev/rules.d/80-nvidia-pm.rules` and `NVreg_DynamicPowerManagement`.
+  - Scans `/proc` for open `/dev/nvidia*` file descriptors and compositor EGL leaks.
+  - Detects rogue polling configurations in `btop.conf` and status bar scripts.
+- **🛠️ Automated 1-Click Remediation (`dgpu-doctor fix`)**:
+  - Automatically pins compositor environment variables (`__EGL_VENDOR_LIBRARY_FILENAMES=50_mesa.json`).
+  - Optimizes `btop.conf` to monitor iGPU only without NVML PCIe polling.
+  - Generates and deploys persistent udev rules and modprobe RTD3 configuration.
+  - Installs the high-performance on-demand gaming wrapper `prime-run`.
+- **📊 Zero-Wake Live Monitor (`dgpu-doctor watch`)**:
+  - Real-time ticker showing dGPU state (`SUSPENDED` vs `ACTIVE`), system wattage, and CPU package power.
+  - **Does NOT wake the GPU**: Queries generic Linux PCI sysfs only, avoiding driver wakes.
+  - **Instant Culprit Detection**: When a wake event occurs, it identifies the exact process (PID & command line) responsible.
+- **🎮 Seamless On-Demand Gaming (`prime-run <game>`)**:
+  - Offloads games (Heroic, Steam, Lutris) to the NVIDIA dGPU at 100% full power.
+  - Automatically drops the GPU back into `D3cold` (0.0W) within 3–5 seconds after the game exits.
+
+---
+
+## 📦 Installation
+
+### Option 1: Standalone Installer (All Linux Distributions)
+```bash
+git clone https://github.com/hariprakash/dgpu-sleep-doctor.git
+cd dgpu-sleep-doctor
+./install.sh
+```
+
+### Option 2: Arch Linux (PKGBUILD)
+```bash
+git clone https://github.com/hariprakash/dgpu-sleep-doctor.git
+cd dgpu-sleep-doctor
+makepkg -si
+```
+
+### Option 3: Python Pip
+```bash
+pip install --user .
+```
+
+---
+
+## 💻 Usage
+
+### 1. Diagnose Your Laptop (`audit`)
+Run a comprehensive diagnostic check:
+```bash
+dgpu-doctor audit
+```
+*Sample output:*
+```text
+=== dGPU Sleep Doctor Diagnostics ===
+
+Target dGPU:       AD107M [GeForce RTX 4050 Max-Q / Mobile] (0000:01:00.0)
+Runtime Status:    suspended
+PCI Power Control: auto
+Battery Discharge: 11.80 W
+
+==================================================
+
+[✓ PASS] Runtime PM: dGPU is in deep sleep (D3cold)
+[✓ PASS] Runtime PM: PCI power/control is set to 'auto'
+[✓ PASS] Audio Controller: NVIDIA Audio controller is unbound / removed
+[✓ PASS] Udev Rules: NVIDIA Runtime PM udev rule is present
+[✓ PASS] Modprobe: NVIDIA DynamicPowerManagement is configured
+[✓ PASS] Compositor EGL: Compositor EGL vendor pinned to Mesa
+[✓ PASS] Terminal Monitors: btop configuration is optimized for iGPU only
+[✓ PASS] Active Clients: No active processes holding /dev/nvidia*
+
+All checks passed! Your dGPU is entering D3cold properly.
+```
+
+### 2. Auto-Fix Power Drain Issues (`fix`)
+Apply all user-space optimizations (btop, compositor environment, live power control, prime-run):
+```bash
+dgpu-doctor fix
+```
+To deploy persistent system-wide udev and modprobe rules:
+```bash
+sudo dgpu-doctor fix --all
+```
+
+### 3. Real-Time Zero-Wake Monitor (`watch`)
+Watch your GPU sleep state and power draw live in your terminal:
+```bash
+dgpu-doctor watch
+```
+*Example live output:*
+```text
+[00:15:22] dGPU: ● SUSPENDED (0.0W) | Battery: 12.1W | CPU Pkg: 3.4W
+```
+If an application launches and wakes the GPU, `dgpu-doctor` immediately reports:
+```text
+[00:16:04] ⚠️  WAKEUP: suspended -> active -> Culprit: heroic (PID 14210)
+[00:25:18] 💤 SLEEP: returned to D3cold suspended (after 554.0s active)
+```
+
+### 4. Gaming On-Demand with PRIME Offload
+Launch any game or 3D compute application on the NVIDIA GPU:
+```bash
+prime-run heroic
+# or
+prime-run vkcube
+```
+The GPU powers on instantly, runs the game at full speed, and drops back to `0.0W` automatically 3–5 seconds after quitting.
+
+---
+
+## 🔧 Technical Details: The Golden Rules of Linux dGPU Sleep
+
+1. **Never read `/proc/driver/nvidia/.../power` in a loop**: Reading this file forces the kernel driver to query hardware registers, keeping the GPU awake.
+2. **Never read `/sys/class/drm/card*-*/status` on discrete cards**: Querying connector `status` triggers kernel DRM hardware `.detect()` DDC probes across the physical HDMI/DP ports. Read `enabled` instead.
+3. **Never run `lspci` in periodic polling scripts**: `lspci` accesses PCI configuration space registers, preventing the PCI bus from entering L2/L3 low-power states.
+4. **Always unbind the NVIDIA Audio device (`0x040300`)**: If WirePlumber opens the HDMI audio interface, the shared physical chip cannot cut power rails.
+
+---
+
+## 🤝 Contributing
+
+Contributions, bug reports, and hardware compatibility reports across different laptop models are welcome!
+1. Fork the repository
+2. Create a feature branch (`git checkout -b feature/new-check`)
+3. Commit your changes (`git commit -m 'Add new check'`)
+4. Push to the branch (`git push origin feature/new-check`)
+5. Open a Pull Request
+
+---
+
+## 📄 License
+
+This project is licensed under the [MIT License](LICENSE).

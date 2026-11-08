@@ -1,0 +1,24 @@
+[build-system]
+requires = ["setuptools>=61.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "dgpu-sleep-doctor"
+version = "1.0.0"
+authors = [
+  { name="Hari Prakash" }
+]
+description = "Diagnostics, auto-remediation, and zero-wake monitoring for NVIDIA hybrid graphics on Linux & Wayland"
+readme = "README.md"
+requires-python = ">=3.8"
+license = { text = "MIT" }
+classifiers = [
+    "Programming Language :: Python :: 3",
+    "Operating System :: POSIX :: Linux",
+    "Environment :: Console",
+    "Topic :: System :: Hardware",
+    "Topic :: System :: Power Management",
+]
+
+[project.scripts]
+dgpu-doctor = "dgpu_doctor.cli:main"

@@ -1,0 +1,12 @@
+[Unit]
+Description=dGPU Sleep Doctor Background Guard (Enforces PCI power/control=auto)
+After=graphical-session.target
+
+[Service]
+Type=simple
+ExecStart=/usr/bin/dgpu-doctor daemon
+Restart=on-failure
+RestartSec=10
+
+[Install]
+WantedBy=default.target
