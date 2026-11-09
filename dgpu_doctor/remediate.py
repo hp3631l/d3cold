@@ -166,26 +166,39 @@ def fix_system_rules() -> List[Tuple[bool, str]]:
 
 
 def apply_live_power_control() -> Tuple[bool, str]:
-    """Immediately set /sys/bus/pci/devices/.../power/control to 'auto'."""
+    """Ensure dGPU power/control is 'auto' and kick device into suspend if wedged."""
     dgpu = find_nvidia_dgpu()
     if not dgpu:
         return False, "No NVIDIA dGPU found."
 
     control_file = dgpu.sysfs_path / "power" / "control"
     try:
-        # Check if writable directly
-        if os.access(control_file, os.W_OK):
-            control_file.write_text("auto\n")
-            return True, f"Set {control_file} to 'auto'."
-        # Try sudo / omalegion-write
-        res = subprocess.run(["sudo", "-n", "tee", str(control_file)], input="auto\n", text=True, capture_output=True)
-        if res.returncode == 0:
-            return True, f"Set {control_file} to 'auto' via sudo."
-        # Try omalegion-write if present
-        if Path("/usr/local/bin/omalegion-write").exists():
-            res = subprocess.run(["sudo", "-n", "/usr/local/bin/omalegion-write", "write", str(control_file), "auto"], capture_output=True, text=True)
+        def _write_val(val: str) -> bool:
+            if os.access(control_file, os.W_OK):
+                control_file.write_text(f"{val}\n")
+                return True
+            res = subprocess.run(["sudo", "-n", "tee", str(control_file)], input=f"{val}\n", text=True, capture_output=True)
             if res.returncode == 0:
-                return True, f"Set {control_file} to 'auto' via omalegion-write."
-        return False, f"Need root to write 'auto' to {control_file}."
+                return True
+            if Path("/usr/local/bin/omalegion-write").exists():
+                res2 = subprocess.run(["sudo", "-n", "/usr/local/bin/omalegion-write", "write", str(control_file), val], capture_output=True, text=True)
+                return res2.returncode == 0
+            return False
+
+        current_ctrl = control_file.read_text().strip() if control_file.exists() else ""
+        current_status = dgpu.runtime_status
+
+        # If control is already auto but GPU is stuck active with no clients, cycle on -> auto
+        if current_ctrl == "auto" and current_status == "active":
+            _write_val("on")
+            import time
+            time.sleep(0.2)
+            if _write_val("auto"):
+                return True, f"Cycled {control_file} (on -> auto) to clear wedged state."
+
+        if _write_val("auto"):
+            return True, f"Set {control_file} to 'auto'."
+
+        return False, f"Need root permissions to write to {control_file}."
     except Exception as e:
         return False, f"Error writing power control: {e}"
