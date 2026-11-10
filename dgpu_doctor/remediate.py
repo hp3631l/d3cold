@@ -177,12 +177,18 @@ def apply_live_power_control() -> Tuple[bool, str]:
             if os.access(control_file, os.W_OK):
                 control_file.write_text(f"{val}\n")
                 return True
-            res = subprocess.run(["sudo", "-n", "tee", str(control_file)], input=f"{val}\n", text=True, capture_output=True)
-            if res.returncode == 0:
-                return True
+            try:
+                res = subprocess.run(["sudo", "-n", "tee", str(control_file)], input=f"{val}\n", text=True, capture_output=True, timeout=2.0)
+                if res.returncode == 0:
+                    return True
+            except Exception:
+                pass
             if Path("/usr/local/bin/omalegion-write").exists():
-                res2 = subprocess.run(["sudo", "-n", "/usr/local/bin/omalegion-write", "write", str(control_file), val], capture_output=True, text=True)
-                return res2.returncode == 0
+                try:
+                    res2 = subprocess.run(["sudo", "-n", "/usr/local/bin/omalegion-write", "write", str(control_file), val], capture_output=True, text=True, timeout=2.0)
+                    return res2.returncode == 0
+                except Exception:
+                    pass
             return False
 
         current_ctrl = control_file.read_text().strip() if control_file.exists() else ""
