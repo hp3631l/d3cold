@@ -1,4 +1,4 @@
-# Maintainer: Hari Prakash
+# Maintainer: hp3631l
 pkgname=dgpu-sleep-doctor
 pkgver=1.0.0
 pkgrel=1
@@ -11,7 +11,7 @@ optdepends=(
     'envycontrol: Alternative hybrid switcher'
     'mesa-utils: eglinfo/glxinfo for prime-run testing'
 )
-source=("$pkgname-$pkgver.tar.gz::https://github.com/hariprakash/$pkgname/archive/v$pkgver.tar.gz")
+source=("$pkgname-$pkgver.tar.gz::https://github.com/hp3631l/$pkgname/archive/v$pkgver.tar.gz")
 sha256sums=('SKIP')
 
 build() {

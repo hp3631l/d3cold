@@ -6,7 +6,7 @@ build-backend = "setuptools.build_meta"
 name = "dgpu-sleep-doctor"
 version = "1.0.0"
 authors = [
-  { name="Hari Prakash" }
+  { name="hp3631l" }
 ]
 description = "Diagnostics, auto-remediation, and zero-wake monitoring for NVIDIA hybrid graphics on Linux & Wayland"
 readme = "README.md"
