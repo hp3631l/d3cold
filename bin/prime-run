@@ -1,12 +1,22 @@
 #!/usr/bin/env bash
 # On-demand NVIDIA Prime Offload wrapper
-# Automatically wakes the dGPU, runs the game/app, and allows it to sleep on exit.
+# Forces games and apps to bind exclusively to the NVIDIA dGPU with full Vulkan/GLX acceleration.
 
 export __NV_PRIME_RENDER_OFFLOAD=1
 export __VK_LAYER_NV_optimus=NVIDIA_only
 export __GLX_VENDOR_LIBRARY_NAME=nvidia
+export DRI_PRIME=1
+
+# Bind Vulkan exclusively to NVIDIA ICD if present
+for icd in /usr/share/vulkan/icd.d/nvidia_icd.json /etc/vulkan/icd.d/nvidia_icd.json; do
+    if [ -f "$icd" ]; then
+        export VK_DRIVER_FILES="$icd"
+        export VK_ICD_FILENAMES="$icd"
+        break
+    fi
+done
+
 unset __EGL_VENDOR_LIBRARY_FILENAMES
-unset VK_DRIVER_FILES
 unset LIBVA_DRIVER_NAME
 
 exec "$@"

@@ -43,13 +43,23 @@ options nvidia NVreg_UsePageAttributeTable=1 NVreg_InitializeSystemMemoryAllocat
 
 PRIME_RUN_CONTENT = """#!/usr/bin/env bash
 # On-demand NVIDIA Prime Offload wrapper
-# Automatically wakes the dGPU, runs the game/app, and allows it to sleep on exit.
+# Forces games and apps to bind exclusively to the NVIDIA dGPU with full Vulkan/GLX acceleration.
 
 export __NV_PRIME_RENDER_OFFLOAD=1
 export __VK_LAYER_NV_optimus=NVIDIA_only
 export __GLX_VENDOR_LIBRARY_NAME=nvidia
+export DRI_PRIME=1
+
+# Bind Vulkan exclusively to NVIDIA ICD if present
+for icd in /usr/share/vulkan/icd.d/nvidia_icd.json /etc/vulkan/icd.d/nvidia_icd.json; do
+    if [ -f "$icd" ]; then
+        export VK_DRIVER_FILES="$icd"
+        export VK_ICD_FILENAMES="$icd"
+        break
+    fi
+done
+
 unset __EGL_VENDOR_LIBRARY_FILENAMES
-unset VK_DRIVER_FILES
 unset LIBVA_DRIVER_NAME
 
 exec "$@"
@@ -85,9 +95,11 @@ def fix_btop() -> Tuple[bool, str]:
 
 def fix_compositor_env() -> List[Tuple[bool, str]]:
     """Configure environment files so Wayland compositors don't leak NVIDIA EGL fds."""
+    from .pci import find_igpu_drm_card
+
     results = []
-    mesa_val = "__EGL_VENDOR_LIBRARY_FILENAMES=/usr/share/glvnd/egl_vendor.d/50_mesa.json"
-    intel_val = "AQ_DRM_DEVICES=/dev/dri/card2"
+    igpu_card = find_igpu_drm_card()
+    intel_val = f"AQ_DRM_DEVICES={igpu_card}"
 
     # 1. ~/.config/environment.d/10-hyprland-gpu.conf
     env_dir = Path.home() / ".config/environment.d"
@@ -269,7 +281,7 @@ def suspend_dgpu(force: bool = False) -> Tuple[bool, str, List[str]]:
     3. Disables driver persistence mode via nvidia-smi -pm 0.
     4. Detects and terminates rogue processes holding /dev/nvidia* if force is True.
     5. Removes or unbinds NVIDIA audio controller (0000:xx:00.1).
-    6. Ensures power/control is 'auto' for both dGPU and parent PCIe bridge.
+    6. Ensures power/control is 'auto' for dGPU while keeping parent PCIe bridge stable.
     7. Polls runtime_status until suspended or timeout.
     """
     from .pci import find_nvidia_audio, get_nvidia_client_processes, _read_trimmed
@@ -335,7 +347,7 @@ def suspend_dgpu(force: bool = False) -> Tuple[bool, str, List[str]]:
             _write_sysfs(remove_file, "1")
             logs.append(f"Removed audio controller {audio.name} from PCI bus.")
 
-    # 5. Set power/control to auto for dGPU and parent PCIe bridge
+    # 5. Set power/control to auto for dGPU
     ctrl_file = Path(f"/sys/bus/pci/devices/{dgpu.pci_address}/power/control")
     if ctrl_file.exists():
         try:

@@ -138,7 +138,7 @@ Battery Discharge: 17.18 W
 [✓ PASS] Terminal Monitors: btop configuration is optimized for iGPU only
 [✓ PASS] Active Clients: No active processes holding /dev/nvidia*
 [✓ PASS] Persistence Daemon: nvidia-persistenced is not running
-[✓ PASS] PCIe Root Port: Parent PCIe bridge 0000:00:01.0 is set to 'auto'
+[✓ PASS] PCIe Root Port: Parent PCIe bridge 0000:00:01.0 is set to 'on' (link retraining safe)
 
 All checks passed! Your dGPU is entering D3cold properly.
 ```
@@ -170,14 +170,44 @@ If an application launches and wakes the GPU, `dgpu-doctor` immediately reports:
 [18:25:18] 💤 SLEEP: returned to D3cold suspended (after 554.0s active)
 ```
 
-### 4. Gaming On-Demand with PRIME Offload
-Launch any game or 3D compute application on the NVIDIA GPU:
+### 4. Gaming On-Demand with PRIME Offload (`prime-run`)
+Modern hybrid setups often suffer from Vulkan adapter confusion: Proton, Wine, DXVK, and vkd3d enumerate adapters starting with the integrated GPU (Intel UHD / Iris Xe / AMD Radeon). When games bind to `GPU0` / `Adapter 0` (the iGPU), they report shared system RAM (e.g. 11,776 MB) instead of dedicated VRAM, fail to negotiate native high-refresh fullscreen modes under Wayland/XWayland, and default to safe-mode resolutions (such as locked 1280x720 Borderless Windowed).
+
+`prime-run` solves this by explicitly routing Vulkan and GLX exclusively to NVIDIA:
+* Exposes **only** the NVIDIA Vulkan ICD (`VK_DRIVER_FILES=/usr/share/vulkan/icd.d/nvidia_icd.json`).
+* Forces NVIDIA offload layers (`__NV_PRIME_RENDER_OFFLOAD=1`, `__VK_LAYER_NV_optimus=NVIDIA_only`, `__GLX_VENDOR_LIBRARY_NAME=nvidia`, `DRI_PRIME=1`).
+* Strips any session-level compositor EGL/Mesa overrides.
+
+#### Launching from CLI:
 ```bash
 prime-run heroic
 # or
 prime-run vkcube
 ```
-The GPU powers on instantly, runs the game at full speed, and drops back to `0.0W` automatically 3–5 seconds after quitting.
+
+#### Steam Configuration:
+Right-click your game in Steam -> **Properties** -> **Launch Options**:
+```bash
+prime-run %command%
+```
+
+#### Heroic Games Launcher Configuration:
+* **Option A (Wrapper command):** In Game Settings -> **Other** -> Set **Wrapper command** to `prime-run`.
+* **Option B (Environment variables):** In Game Settings -> **Environment Variables**, add:
+  * `VK_DRIVER_FILES` = `/usr/share/vulkan/icd.d/nvidia_icd.json`
+  * `VK_ICD_FILENAMES` = `/usr/share/vulkan/icd.d/nvidia_icd.json`
+  * `__NV_PRIME_RENDER_OFFLOAD` = `1`
+  * `__GLX_VENDOR_LIBRARY_NAME` = `nvidia`
+  * `DRI_PRIME` = `1`
+
+#### Hyprland / Wayland Game Fullscreen Rules:
+To guarantee games automatically launch in true borderless or exclusive fullscreen without compositor titlebars, scaling artifacts, or tearing:
+```ini
+# Hyprland window rules for Proton and native games
+windowrulev2 = fullscreen, class:^(.*(RDR2|steam_app|wine|proton).*)$
+windowrulev2 = immediate, class:^(.*(RDR2|steam_app|wine|proton).*)$
+windowrulev2 = idleinhibit fullscreen, class:^(.*(RDR2|steam_app|wine|proton).*)$
+```
 
 ### 5. Automated Power Profile Switcher (`power-profile-switch`)
 Included in the repo and installed by default:
@@ -195,6 +225,8 @@ power-profile-switch game     # Switches to Maximum Gaming performance with Max 
 3. **Never run `lspci` in periodic polling scripts**: `lspci` accesses PCI configuration space registers, preventing the PCI bus from entering L2/L3 low-power states.
 4. **Always unbind the NVIDIA Audio device (`0x040300`)**: If WirePlumber opens the HDMI audio interface, the shared physical chip cannot cut power rails.
 5. **Protect input host controllers from blanket PCI runtime PM loops**: Never write `auto` to Serial IO I2C controllers (e.g. `0000:00:15.*`), or the kernel will power down the touchpad bus.
+6. **Keep upstream PCIe root port bridge at `power/control = on`**: Setting the root port bridge (`0000:00:01.0`) to `auto` causes PCIe link retraining timeouts on cold wakeups, triggering NVIDIA GSP firmware wedge crashes (`NV_ERR_RESET_REQUIRED 0x62`). Leaving it at `on` preserves rock-solid link stability while allowing the dGPU endpoint to drop into `D3cold` (0.0 W).
+7. **Never export Mesa/Intel Vulkan ICDs globally session-wide**: Never hardcode `VK_DRIVER_FILES=intel_icd.json` in global files (`/etc/environment`, `~/.config/environment.d/`, or `uwsm`). Doing so starves Vulkan games and Proton from discovering the NVIDIA driver, locking 3D games to the iGPU or causing immediate startup crashes. Always isolate with `prime-run`.
 
 ---
 

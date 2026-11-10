@@ -28,15 +28,10 @@ mkdir -p "${SHARE_DIR}"
 cp -r "${SCRIPT_DIR}/dgpu_doctor" "${SHARE_DIR}/"
 
 # Install prime-run
-cat << 'EOF' > "${BIN_DIR}/prime-run"
-#!/usr/bin/env bash
-export __NV_PRIME_RENDER_OFFLOAD=1
-export __VK_LAYER_NV_optimus=NVIDIA_only
-export __GLX_VENDOR_LIBRARY_NAME=nvidia
-unset __EGL_VENDOR_LIBRARY_FILENAMES
-exec "$@"
-EOF
-chmod +x "${BIN_DIR}/prime-run"
+if [ -f "${SCRIPT_DIR}/bin/prime-run" ]; then
+    cp "${SCRIPT_DIR}/bin/prime-run" "${BIN_DIR}/prime-run"
+    chmod +x "${BIN_DIR}/prime-run"
+fi
 
 # Install power-profile-switch if present
 if [ -f "${SCRIPT_DIR}/bin/power-profile-switch" ]; then
