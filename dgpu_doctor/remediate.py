@@ -84,19 +84,17 @@ def fix_btop() -> Tuple[bool, str]:
 
 
 def fix_compositor_env() -> List[Tuple[bool, str]]:
-    """Configure environment files so Wayland compositors and apps don't leak NVIDIA EGL/Vulkan fds."""
+    """Configure environment files so Wayland compositors don't leak NVIDIA EGL fds."""
     results = []
     mesa_val = "__EGL_VENDOR_LIBRARY_FILENAMES=/usr/share/glvnd/egl_vendor.d/50_mesa.json"
     intel_val = "AQ_DRM_DEVICES=/dev/dri/card2"
-    vk_val = "VK_DRIVER_FILES=/usr/share/vulkan/icd.d/intel_icd.json"
-    va_val = "LIBVA_DRIVER_NAME=iHD"
 
     # 1. ~/.config/environment.d/10-hyprland-gpu.conf
     env_dir = Path.home() / ".config/environment.d"
     env_file = env_dir / "10-hyprland-gpu.conf"
     try:
         env_dir.mkdir(parents=True, exist_ok=True)
-        content = f"{intel_val}\n{mesa_val}\n{vk_val}\n{va_val}\n"
+        content = f"{intel_val}\n"
         env_file.write_text(content)
         results.append((True, f"Updated {env_file}"))
     except Exception as e:
@@ -112,9 +110,6 @@ def fix_compositor_env() -> List[Tuple[bool, str]]:
             prefixes = ("export AQ_DRM_DEVICES", "export __EGL_VENDOR_LIBRARY_FILENAMES", "export VK_DRIVER_FILES", "export LIBVA_DRIVER_NAME")
             lines = [l for l in uwsm_file.read_text().splitlines() if not any(l.startswith(p) for p in prefixes)]
         lines.append(f"export {intel_val}")
-        lines.append(f"export {mesa_val}")
-        lines.append(f"export {vk_val}")
-        lines.append(f"export {va_val}")
         uwsm_file.write_text("\n".join(lines) + "\n")
         results.append((True, f"Updated {uwsm_file}"))
     except Exception as e:
