@@ -60,10 +60,17 @@ else
     # 3. Set Lenovo Platform Profile to low-power (Quiet Mode)
     _write_legion "$PROFILE_NODE" "low-power"
     
-    # 4. Do not blindly force 'auto' on PCI buses that break input devices (I2C host controller 0000:00:15.*) or dGPU (0000:01:00.0)
+    # 4. Enable runtime PM on non-critical PCIe devices (Ethernet, NVMe SSD, WiFi)
+    _write_legion "/sys/bus/pci/devices/0000:07:00.0/power/control" "auto"
+    _write_legion "/sys/bus/pci/devices/0000:06:00.0/power/control" "auto"
+    _write_legion "/sys/bus/pci/devices/0000:00:14.3/power/control" "auto"
+
+    # 5. Protect input devices & PCIe root port stability
     # The touchpad host controller must remain ON so touches are registered.
     _write_legion "/sys/bus/pci/devices/0000:00:15.0/power/control" "on"
     _write_legion "/sys/bus/pci/devices/0000:00:15.1/power/control" "on"
+    # Root port for dGPU must remain ON to avoid cold wake link timeouts
+    _write_legion "/sys/bus/pci/devices/0000:00:01.0/power/control" "on"
     
     echo "✅ Battery power saving active."
     
