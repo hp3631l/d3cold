@@ -48,9 +48,9 @@ PRIME_RUN_CONTENT = """#!/usr/bin/env bash
 export __NV_PRIME_RENDER_OFFLOAD=1
 export __VK_LAYER_NV_optimus=NVIDIA_only
 export __GLX_VENDOR_LIBRARY_NAME=nvidia
-export VK_DRIVER_FILES=/usr/share/vulkan/icd.d/nvidia_icd.json
-export LIBVA_DRIVER_NAME=nvidia
 unset __EGL_VENDOR_LIBRARY_FILENAMES
+unset VK_DRIVER_FILES
+unset LIBVA_DRIVER_NAME
 
 exec "$@"
 """
