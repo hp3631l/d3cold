@@ -1,0 +1,12 @@
+[Unit]
+Description=Auto Power Profile Switcher (AC vs Battery)
+After=graphical-session.target
+
+[Service]
+Type=simple
+ExecStart=/bin/bash -c 'exec upower --monitor | while read -r line; do if echo "$line" | grep -q "line_power_ADP0"; then %h/.local/bin/power-profile-switch auto; fi; done'
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=default.target

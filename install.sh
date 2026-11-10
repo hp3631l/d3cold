@@ -40,6 +40,16 @@ if [ -f "${SCRIPT_DIR}/bin/power-profile-switch" ]; then
     echo "✓ Installed power-profile-switch to ${BIN_DIR}/power-profile-switch"
 fi
 
+# Install systemd auto-watcher service if present
+USER_SYSTEMD_DIR="${HOME}/.config/systemd/user"
+if [ -f "${SCRIPT_DIR}/systemd/power-profile-watcher.service" ]; then
+    mkdir -p "${USER_SYSTEMD_DIR}"
+    cp "${SCRIPT_DIR}/systemd/power-profile-watcher.service" "${USER_SYSTEMD_DIR}/power-profile-watcher.service"
+    systemctl --user daemon-reload 2>/dev/null || true
+    systemctl --user enable --now power-profile-watcher.service 2>/dev/null || true
+    echo "✓ Enabled power-profile-watcher.service for automatic AC/Battery switching"
+fi
+
 echo "✓ Installed dgpu-doctor to ${BIN_DIR}/dgpu-doctor"
 echo "✓ Installed prime-run to ${BIN_DIR}/prime-run"
 echo ""
