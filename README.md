@@ -92,15 +92,15 @@ Before installing `dgpu-doctor`, ensure your system meets the following hardware
 
 ### Option 1: Standalone Installer (All Linux Distributions)
 ```bash
-git clone https://github.com/hp3631l/dgpu-sleep-doctor.git
-cd dgpu-sleep-doctor
+git clone https://github.com/hp3631l/d3cold.git
+cd d3cold
 ./install.sh
 ```
 
 ### Option 2: Arch Linux (PKGBUILD)
 ```bash
-git clone https://github.com/hp3631l/dgpu-sleep-doctor.git
-cd dgpu-sleep-doctor
+git clone https://github.com/hp3631l/d3cold.git
+cd d3cold
 makepkg -si
 ```
 
