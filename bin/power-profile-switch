@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Power profile switcher for Lenovo LOQ 15IAX9E: Battery (<15W) vs AC Default vs Gaming (Full Speed)
+# Power profile switcher for Lenovo LOQ 15IAX9E: Battery Deep Power Saving vs AC Balanced vs Gaming Performance
 
 set -e
 
@@ -7,72 +7,117 @@ MODE="${1:-auto}"
 AC_ONLINE=$(cat /sys/class/power_supply/ADP0/online 2>/dev/null || cat /sys/class/power_supply/ACAD/online 2>/dev/null || echo "0")
 PROFILE_NODE="/sys/devices/platform/legion/platform-profile/platform-profile-0/profile"
 FULLSPEED_NODE="/sys/devices/platform/legion/fan_fullspeed"
+IGPU_MAX_FREQ_NODE="/sys/bus/pci/devices/0000:00:02.0/drm/card2/gt_max_freq_mhz"
 
 _write_legion() {
     sudo -n /usr/local/bin/omalegion-write write "$1" "$2" > /dev/null 2>&1 || true
 }
 
 _apply_cpu() {
+    local profile="$1"
+    if command -v powerprofilesctl >/dev/null 2>&1; then
+        powerprofilesctl set "$profile" >/dev/null 2>&1 || true
+    fi
     if command -v ryoku-power >/dev/null 2>&1; then
-        sudo -n /usr/local/bin/ryoku-power apply-profile "$1" > /dev/null 2>&1 || true
+        sudo -n /usr/local/bin/ryoku-power apply-profile "$profile" > /dev/null 2>&1 || true
     fi
 }
+
+WIFI_IFACE=$(iw dev 2>/dev/null | awk '$1=="Interface"{print $2; exit}')
 
 if [ "$MODE" = "game" ] || [ "$MODE" = "full" ] || [ "$MODE" = "custom" ]; then
     echo "🎮 Switching to GAMING / MAXIMUM PERFORMANCE MODE"
     
-    # 1. CPU profile to performance via ryoku-power
+    # 1. CPU profile to performance (governor: performance, EPP: performance, maxFreq: 100%)
     _apply_cpu "performance"
     
-    # 2. Switch Lenovo profile to custom (required for fan_fullspeed)
+    # 2. Restore full Intel iGPU boost frequency (1450 MHz)
+    _write_legion "$IGPU_MAX_FREQ_NODE" "1450"
+    
+    # 3. Disable WiFi power saving for minimum online latency
+    if [ -n "$WIFI_IFACE" ]; then
+        iw dev "$WIFI_IFACE" set power_save off 2>/dev/null || true
+    fi
+
+    # 4. PCIe performance (SSD, WiFi, Ethernet on)
+    _write_legion "/sys/bus/pci/devices/0000:06:00.0/power/control" "on"
+    _write_legion "/sys/bus/pci/devices/0000:00:14.3/power/control" "on"
+    _write_legion "/sys/bus/pci/devices/0000:00:15.0/power/control" "on"
+    _write_legion "/sys/bus/pci/devices/0000:00:15.1/power/control" "on"
+    _write_legion "/sys/bus/pci/devices/0000:00:01.0/power/control" "on"
+    
+    # 5. Switch Lenovo profile to custom (required for fan_fullspeed)
     _write_legion "$PROFILE_NODE" "custom"
     
-    # 3. Turn on full speed fan (5600 RPM max hardware speed)
+    # 6. Turn on full speed fan (5600 RPM max hardware speed)
     _write_legion "$FULLSPEED_NODE" "1"
     
-    echo "✅ Gaming mode active: EPP performance, Fan MAX (5600 RPM)."
+    echo "✅ Gaming mode active: Max CPU/iGPU Clocks, Fan MAX (5600 RPM)."
     exit 0
 fi
 
 if [ "$AC_ONLINE" = "1" ] || [ "$MODE" = "ac" ] || [ "$MODE" = "balance" ]; then
-    echo "⚡ AC Power detected -> Restoring DEFAULT / NORMAL STATE"
+    echo "⚡ AC Power detected -> Restoring DEFAULT / NORMAL BALANCED STATE"
     
-    # 1. Restore CPU energy performance preference to balanced
+    # 1. Restore CPU profile to balanced (governor: powersave, EPP: balance_performance, maxFreq: 100%)
     _apply_cpu "balanced"
     
-    # 2. Restore normal auto fan control
+    # 2. Restore full Intel iGPU frequency (1450 MHz)
+    _write_legion "$IGPU_MAX_FREQ_NODE" "1450"
+    
+    # 3. Turn off full speed fan forcing
     _write_legion "$FULLSPEED_NODE" "0"
     
-    # 3. Restore Lenovo Platform Profile to balanced
+    # 4. Restore Lenovo Platform Profile to balanced
     _write_legion "$PROFILE_NODE" "balanced"
     
-    echo "✅ System restored to normal balanced state."
+    # 5. Disable WiFi power saving for responsive browsing/streaming
+    if [ -n "$WIFI_IFACE" ]; then
+        iw dev "$WIFI_IFACE" set power_save off 2>/dev/null || true
+    fi
+
+    # 6. Restore PCIe performance on AC (NVMe & WiFi)
+    _write_legion "/sys/bus/pci/devices/0000:06:00.0/power/control" "on"
+    _write_legion "/sys/bus/pci/devices/0000:00:14.3/power/control" "on"
+    _write_legion "/sys/bus/pci/devices/0000:00:15.0/power/control" "on"
+    _write_legion "/sys/bus/pci/devices/0000:00:15.1/power/control" "on"
+    _write_legion "/sys/bus/pci/devices/0000:00:01.0/power/control" "on"
+    
+    echo "✅ System restored to normal balanced AC state."
 
 else
-    echo "🔋 Battery detected -> Applying DEEP POWER SAVING (<15W Target)"
+    echo "🔋 Battery detected -> Applying DEEP POWER SAVING (<10W Target)"
     
-    # 1. CPU profile to power-saver
+    # 1. CPU profile to power-saver (governor: powersave, EPP: power, maxFreq: 50%)
     _apply_cpu "power-saver"
     
-    # 2. Turn off full speed fan forcing
+    # 2. Clamp Intel iGPU max frequency to 400 MHz (saves ~1.0W–1.5W of System Agent draw)
+    _write_legion "$IGPU_MAX_FREQ_NODE" "400"
+    
+    # 3. Turn off full speed fan forcing
     _write_legion "$FULLSPEED_NODE" "0"
     
-    # 3. Set Lenovo Platform Profile to low-power (Quiet Mode)
+    # 4. Set Lenovo Platform Profile to low-power (Quiet Mode)
     _write_legion "$PROFILE_NODE" "low-power"
     
-    # 4. Enable runtime PM on non-critical PCIe devices (Ethernet, NVMe SSD, WiFi)
+    # 5. Enable WiFi power saving
+    if [ -n "$WIFI_IFACE" ]; then
+        iw dev "$WIFI_IFACE" set power_save on 2>/dev/null || true
+    fi
+
+    # 6. Enable runtime PM on non-critical PCIe devices (Ethernet, NVMe SSD, WiFi)
     _write_legion "/sys/bus/pci/devices/0000:07:00.0/power/control" "auto"
     _write_legion "/sys/bus/pci/devices/0000:06:00.0/power/control" "auto"
     _write_legion "/sys/bus/pci/devices/0000:00:14.3/power/control" "auto"
 
-    # 5. Protect input devices & PCIe root port stability
+    # 7. Protect input devices & PCIe root port stability
     # The touchpad host controller must remain ON so touches are registered.
     _write_legion "/sys/bus/pci/devices/0000:00:15.0/power/control" "on"
     _write_legion "/sys/bus/pci/devices/0000:00:15.1/power/control" "on"
     # Root port for dGPU must remain ON to avoid cold wake link timeouts
     _write_legion "/sys/bus/pci/devices/0000:00:01.0/power/control" "on"
     
-    echo "✅ Battery power saving active."
+    echo "✅ Deep battery power saving active."
     
     # Show current discharge rate
     sleep 1
