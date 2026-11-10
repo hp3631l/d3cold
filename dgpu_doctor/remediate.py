@@ -43,11 +43,13 @@ options nvidia NVreg_UsePageAttributeTable=1 NVreg_InitializeSystemMemoryAllocat
 
 PRIME_RUN_CONTENT = """#!/usr/bin/env bash
 # On-demand NVIDIA Prime Offload wrapper
-# Automatically wakes the dGPU, runs the game, and allows it to sleep on exit.
+# Automatically wakes the dGPU, runs the game/app, and allows it to sleep on exit.
 
 export __NV_PRIME_RENDER_OFFLOAD=1
 export __VK_LAYER_NV_optimus=NVIDIA_only
 export __GLX_VENDOR_LIBRARY_NAME=nvidia
+export VK_DRIVER_FILES=/usr/share/vulkan/icd.d/nvidia_icd.json
+export LIBVA_DRIVER_NAME=nvidia
 unset __EGL_VENDOR_LIBRARY_FILENAMES
 
 exec "$@"
@@ -82,17 +84,19 @@ def fix_btop() -> Tuple[bool, str]:
 
 
 def fix_compositor_env() -> List[Tuple[bool, str]]:
-    """Configure environment files so Wayland compositors don't leak NVIDIA EGL fds."""
+    """Configure environment files so Wayland compositors and apps don't leak NVIDIA EGL/Vulkan fds."""
     results = []
     mesa_val = "__EGL_VENDOR_LIBRARY_FILENAMES=/usr/share/glvnd/egl_vendor.d/50_mesa.json"
     intel_val = "AQ_DRM_DEVICES=/dev/dri/card2"
+    vk_val = "VK_DRIVER_FILES=/usr/share/vulkan/icd.d/intel_icd.json"
+    va_val = "LIBVA_DRIVER_NAME=iHD"
 
     # 1. ~/.config/environment.d/10-hyprland-gpu.conf
     env_dir = Path.home() / ".config/environment.d"
     env_file = env_dir / "10-hyprland-gpu.conf"
     try:
         env_dir.mkdir(parents=True, exist_ok=True)
-        content = f"{intel_val}\n{mesa_val}\n"
+        content = f"{intel_val}\n{mesa_val}\n{vk_val}\n{va_val}\n"
         env_file.write_text(content)
         results.append((True, f"Updated {env_file}"))
     except Exception as e:
@@ -105,9 +109,12 @@ def fix_compositor_env() -> List[Tuple[bool, str]]:
         uwsm_dir.mkdir(parents=True, exist_ok=True)
         lines = []
         if uwsm_file.exists():
-            lines = [l for l in uwsm_file.read_text().splitlines() if not l.startswith("export AQ_DRM_DEVICES") and not l.startswith("export __EGL_VENDOR_LIBRARY_FILENAMES")]
+            prefixes = ("export AQ_DRM_DEVICES", "export __EGL_VENDOR_LIBRARY_FILENAMES", "export VK_DRIVER_FILES", "export LIBVA_DRIVER_NAME")
+            lines = [l for l in uwsm_file.read_text().splitlines() if not any(l.startswith(p) for p in prefixes)]
         lines.append(f"export {intel_val}")
         lines.append(f"export {mesa_val}")
+        lines.append(f"export {vk_val}")
+        lines.append(f"export {va_val}")
         uwsm_file.write_text("\n".join(lines) + "\n")
         results.append((True, f"Updated {uwsm_file}"))
     except Exception as e:
@@ -346,18 +353,11 @@ def suspend_dgpu(force: bool = False) -> Tuple[bool, str, List[str]]:
         except Exception:
             _write_sysfs(ctrl_file, "auto")
 
+    # Keep parent bridge at 'on' to preserve PCIe link retraining stability on cold resume
     parent_bridge_addr = dgpu.sysfs_path.resolve().parent.name
     parent_ctrl = Path(f"/sys/bus/pci/devices/{parent_bridge_addr}/power/control")
     if parent_ctrl.exists():
-        try:
-            if parent_ctrl.read_text().strip() == "auto":
-                logs.append(f"Parent bridge {parent_bridge_addr} already 'auto'.")
-            elif _write_sysfs(parent_ctrl, "auto"):
-                logs.append(f"Set parent bridge {parent_bridge_addr} power/control -> auto.")
-            else:
-                logs.append(f"Warning: Failed to set parent bridge {parent_bridge_addr} -> auto.")
-        except Exception:
-            _write_sysfs(parent_ctrl, "auto")
+        logs.append(f"Parent bridge {parent_bridge_addr} left at '{parent_ctrl.read_text().strip()}' for link stability.")
 
     # 6. Active verification polling loop (up to 7s to cover 5s autosuspend delay)
     import time
