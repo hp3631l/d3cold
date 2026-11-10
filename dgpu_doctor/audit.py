@@ -12,6 +12,7 @@ from pathlib import Path
 from typing import List
 
 from .pci import (
+    _read_trimmed,
     find_gpus,
     find_nvidia_audio,
     find_nvidia_dgpu,
@@ -38,6 +39,7 @@ class AuditReport:
     runtime_status: str = "unknown"
     power_control: str = "unknown"
     battery_watts: float | None = None
+    battery_status: str = "Unknown"
     cpu_package_watts: float | None = None
 
     @property
@@ -52,7 +54,7 @@ class AuditReport:
 def run_audit() -> AuditReport:
     """Run all 5 audit layers and return a structured report."""
     report = AuditReport()
-    report.battery_watts = get_battery_energy_rate()
+    report.battery_watts, report.battery_status = get_battery_energy_rate()
 
     dgpu = find_nvidia_dgpu()
     if not dgpu:
@@ -145,6 +147,32 @@ def run_audit() -> AuditReport:
                 details="No audio controller on the NVIDIA slot is preventing D3cold transition.",
             )
         )
+
+    # Layer 2b: NVIDIA Persistence Daemon & Driver Persistence
+    import subprocess
+    try:
+        check = subprocess.run(["systemctl", "is-active", "nvidia-persistenced"], capture_output=True, text=True, timeout=1.5)
+        if check.stdout.strip() == "active":
+            report.findings.append(
+                AuditFinding(
+                    category="Persistence Mode",
+                    status="FAIL",
+                    title="nvidia-persistenced is active (locks GPU awake in D0)",
+                    details="nvidia-persistenced maintains persistent driver state, preventing RTD3 D3cold suspension.",
+                    remediation="Run `sudo systemctl disable --now nvidia-persistenced` or `dgpu-doctor suspend`.",
+                )
+            )
+        else:
+            report.findings.append(
+                AuditFinding(
+                    category="Persistence Mode",
+                    status="PASS",
+                    title="nvidia-persistenced is inactive",
+                    details="Persistence daemon is not keeping driver initialized.",
+                )
+            )
+    except Exception:
+        pass
 
     # Layer 3: Kernel Module Parameters and Udev Rules
     udev_pm_file = Path("/etc/udev/rules.d/80-nvidia-pm.rules")
@@ -285,5 +313,57 @@ def run_audit() -> AuditReport:
                 details="Zero open file descriptors to NVIDIA driver files found in /proc.",
             )
         )
+
+    # Layer 6: NVIDIA Persistence Daemon
+    try:
+        res_pers = subprocess.run(["systemctl", "is-active", "nvidia-persistenced"], capture_output=True, text=True, timeout=1.0)
+        is_pers_active = res_pers.stdout.strip() == "active"
+    except Exception:
+        is_pers_active = False
+
+    if is_pers_active:
+        report.findings.append(
+            AuditFinding(
+                category="Persistence Daemon",
+                status="FAIL",
+                title="nvidia-persistenced is active (inhibits D3cold sleep)",
+                details="NVIDIA Persistence Daemon keeps the driver context initialized in VRAM 24/7, preventing runtime D3cold.",
+                remediation="Run `dgpu-doctor fix` or `sudo systemctl disable --now nvidia-persistenced`.",
+            )
+        )
+    else:
+        report.findings.append(
+            AuditFinding(
+                category="Persistence Daemon",
+                status="PASS",
+                title="nvidia-persistenced is not running",
+                details="Persistence mode is disabled, allowing the kernel to place the GPU in D3cold.",
+            )
+        )
+
+    # Layer 7: Parent PCIe Bridge Runtime PM
+    parent_bridge = dgpu.sysfs_path.resolve().parent
+    parent_ctrl_file = parent_bridge / "power" / "control"
+    if parent_ctrl_file.exists():
+        parent_ctrl = _read_trimmed(parent_ctrl_file)
+        if parent_ctrl == "auto":
+            report.findings.append(
+                AuditFinding(
+                    category="PCIe Root Port",
+                    status="PASS",
+                    title=f"Parent PCIe bridge {parent_bridge.name} is set to 'auto'",
+                    details=f"{parent_ctrl_file} allows secondary bus power management.",
+                )
+            )
+        else:
+            report.findings.append(
+                AuditFinding(
+                    category="PCIe Root Port",
+                    status="FAIL",
+                    title=f"Parent PCIe bridge {parent_bridge.name} is '{parent_ctrl}'",
+                    details=f"{parent_ctrl_file} must be 'auto' for the dGPU to enter D3cold.",
+                    remediation="Set parent bridge power/control to 'auto' via `dgpu-doctor fix`.",
+                )
+            )
 
     return report

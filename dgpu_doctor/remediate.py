@@ -129,6 +129,24 @@ def install_prime_run() -> Tuple[bool, str]:
         return False, f"Failed to install prime-run: {e}"
 
 
+def are_system_rules_installed() -> bool:
+    """Check if /etc/udev/rules.d/80-nvidia-pm.rules and /etc/modprobe.d/nvidia.conf exist and match."""
+    udev_path = Path("/etc/udev/rules.d/80-nvidia-pm.rules")
+    modprobe_path = Path("/etc/modprobe.d/nvidia.conf")
+    if not udev_path.exists() or not modprobe_path.exists():
+        return False
+    try:
+        modprobe_txt = modprobe_path.read_text()
+        if "NVreg_DynamicPowerManagement=0x02" not in modprobe_txt:
+            return False
+        udev_txt = udev_path.read_text()
+        if 'ATTR{power/control}="auto"' not in udev_txt:
+            return False
+        return True
+    except OSError:
+        return False
+
+
 def fix_system_rules() -> List[Tuple[bool, str]]:
     """Install /etc/udev/rules.d/80-nvidia-pm.rules and /etc/modprobe.d/nvidia.conf using sudo."""
     results = []
@@ -165,46 +183,200 @@ def fix_system_rules() -> List[Tuple[bool, str]]:
     return results
 
 
+def _normalize_pci_sysfs_path(path: Path | str) -> str:
+    target_str = str(path)
+    # If path is a resolved sysfs path like /sys/devices/pci0000:00/0000:00:01.0/power/control
+    # Convert it to /sys/bus/pci/devices/0000:00:01.0/power/control so omalegion-write accepts it.
+    m = re.search(r"(?:/sys/devices/pci[^/]+/)?(0000:[0-9a-fA-F]{2}:[0-9a-fA-F]{2}\.[0-9a-fA-F])/(power/[a-zA-Z0-9_]+|remove)$", target_str)
+    if m:
+        pci_addr = m.group(1)
+        subpath = m.group(2)
+        return f"/sys/bus/pci/devices/{pci_addr}/{subpath}"
+    return target_str
+
+
+def _write_sysfs(path: Path | str, value: str) -> bool:
+    target_str = _normalize_pci_sysfs_path(path)
+    target = Path(target_str)
+
+    # If target already has this exact value, avoid waking device or calling sudo
+    try:
+        if target.exists() and target.read_text().strip() == value.strip():
+            return True
+    except OSError:
+        pass
+
+    if os.access(target, os.W_OK):
+        try:
+            target.write_text(f"{value}\n")
+            return True
+        except OSError:
+            pass
+
+    # Try omalegion-write via passwordless sudo
+    if Path("/usr/local/bin/omalegion-write").exists():
+        try:
+            res = subprocess.run(
+                ["sudo", "-n", "/usr/local/bin/omalegion-write", "write", target_str, value],
+                capture_output=True,
+                text=True,
+                timeout=2.0,
+            )
+            if res.returncode == 0:
+                return True
+        except Exception:
+            pass
+
+    # Try pkexec or sudo tee
+    for cmd in (
+        ["pkexec", "bash", "-c", f"echo '{value}' > '{target_str}'"],
+        ["sudo", "-n", "bash", "-c", f"echo '{value}' > '{target_str}'"],
+    ):
+        try:
+            res = subprocess.run(cmd, capture_output=True, timeout=1.5)
+            if res.returncode == 0:
+                return True
+        except Exception:
+            pass
+    return False
+
+
 def apply_live_power_control() -> Tuple[bool, str]:
-    """Ensure dGPU power/control is 'auto' and kick device into suspend if wedged."""
+    """Ensure dGPU power/control is 'auto' without waking up the card."""
     dgpu = find_nvidia_dgpu()
     if not dgpu:
         return False, "No NVIDIA dGPU found."
 
-    control_file = dgpu.sysfs_path / "power" / "control"
+    control_file = Path(f"/sys/bus/pci/devices/{dgpu.pci_address}/power/control")
     try:
-        def _write_val(val: str) -> bool:
-            if os.access(control_file, os.W_OK):
-                control_file.write_text(f"{val}\n")
-                return True
-            try:
-                res = subprocess.run(["sudo", "-n", "tee", str(control_file)], input=f"{val}\n", text=True, capture_output=True, timeout=2.0)
-                if res.returncode == 0:
-                    return True
-            except Exception:
-                pass
-            if Path("/usr/local/bin/omalegion-write").exists():
-                try:
-                    res2 = subprocess.run(["sudo", "-n", "/usr/local/bin/omalegion-write", "write", str(control_file), val], capture_output=True, text=True, timeout=2.0)
-                    return res2.returncode == 0
-                except Exception:
-                    pass
-            return False
+        if control_file.exists() and control_file.read_text().strip() == "auto":
+            return True, f"{control_file} is already set to 'auto'."
+    except OSError:
+        pass
 
-        current_ctrl = control_file.read_text().strip() if control_file.exists() else ""
-        current_status = dgpu.runtime_status
+    if _write_sysfs(control_file, "auto"):
+        return True, f"Set {control_file} to 'auto'."
+    return False, f"Failed to set {control_file} to 'auto'."
 
-        # If control is already auto but GPU is stuck active with no clients, cycle on -> auto
-        if current_ctrl == "auto" and current_status == "active":
-            _write_val("on")
-            import time
-            time.sleep(0.2)
-            if _write_val("auto"):
-                return True, f"Cycled {control_file} (on -> auto) to clear wedged state."
 
-        if _write_val("auto"):
-            return True, f"Set {control_file} to 'auto'."
+def suspend_dgpu(force: bool = False) -> Tuple[bool, str, List[str]]:
+    """Actively suspend the NVIDIA dGPU into D3cold (0.0 W).
 
-        return False, f"Need root permissions to write to {control_file}."
+    1. Checks if already in D3cold (avoiding unnecessary wake loops).
+    2. Stops and disables nvidia-persistenced (which keeps driver awake).
+    3. Disables driver persistence mode via nvidia-smi -pm 0.
+    4. Detects and terminates rogue processes holding /dev/nvidia* if force is True.
+    5. Removes or unbinds NVIDIA audio controller (0000:xx:00.1).
+    6. Ensures power/control is 'auto' for both dGPU and parent PCIe bridge.
+    7. Polls runtime_status until suspended or timeout.
+    """
+    from .pci import find_nvidia_audio, get_nvidia_client_processes, _read_trimmed
+
+    logs: List[str] = []
+    dgpu = find_nvidia_dgpu()
+    if not dgpu:
+        return False, "No NVIDIA dGPU found on PCI bus.", logs
+
+    # Check if ALREADY suspended in D3cold
+    cur_status = _read_trimmed(dgpu.sysfs_path / "power" / "runtime_status")
+    cur_state = _read_trimmed(dgpu.sysfs_path / "power_state")
+    if cur_status == "suspended" or cur_state == "D3cold":
+        logs.append(f"dGPU is already in {cur_state} ({cur_status}).")
+        return True, f"dGPU is in deep sleep {cur_state} (0.0 W).", logs
+
+    # 1. Stop and disable nvidia-persistenced if running
+    try:
+        check = subprocess.run(["systemctl", "is-active", "nvidia-persistenced"], capture_output=True, text=True, timeout=1.5)
+        if check.stdout.strip() == "active":
+            logs.append("Stopping nvidia-persistenced.service...")
+            subprocess.run(["pkexec", "systemctl", "stop", "nvidia-persistenced"], capture_output=True, timeout=2.0)
+            subprocess.run(["pkexec", "systemctl", "disable", "nvidia-persistenced"], capture_output=True, timeout=2.0)
+            logs.append("nvidia-persistenced stopped and disabled.")
     except Exception as e:
-        return False, f"Error writing power control: {e}"
+        logs.append(f"Warning: Failed to check/stop nvidia-persistenced: {e}")
+
+    # 2. Disable persistence mode via nvidia-smi
+    try:
+        subprocess.run(["nvidia-smi", "-pm", "0"], capture_output=True, timeout=2.0)
+        logs.append("Persistence mode set to Off (nvidia-smi -pm 0).")
+    except Exception:
+        pass
+
+    # 3. Check for client processes holding the GPU
+    clients = get_nvidia_client_processes()
+    if clients:
+        pids = [c["pid"] for c in clients]
+        names = [f"{c['comm']} (PID {c['pid']})" for c in clients]
+        logs.append(f"Found active GPU clients: {', '.join(names)}")
+        if force:
+            logs.append("Terminating client processes holding dGPU...")
+            for pid in pids:
+                try:
+                    os.kill(pid, 15)  # SIGTERM
+                except OSError:
+                    pass
+            import time
+            time.sleep(0.5)
+            for pid in pids:
+                try:
+                    os.kill(pid, 9)  # SIGKILL
+                except OSError:
+                    pass
+        else:
+            logs.append("Note: Pass --force to terminate rogue processes holding the dGPU.")
+
+    # 4. Remove audio function if present
+    audio = find_nvidia_audio()
+    if audio and audio.exists():
+        remove_file = audio / "remove"
+        if remove_file.exists():
+            _write_sysfs(remove_file, "1")
+            logs.append(f"Removed audio controller {audio.name} from PCI bus.")
+
+    # 5. Set power/control to auto for dGPU and parent PCIe bridge
+    ctrl_file = Path(f"/sys/bus/pci/devices/{dgpu.pci_address}/power/control")
+    if ctrl_file.exists():
+        try:
+            if ctrl_file.read_text().strip() == "auto":
+                logs.append(f"{ctrl_file} already 'auto'.")
+            elif _write_sysfs(ctrl_file, "auto"):
+                logs.append(f"Set {ctrl_file} -> auto.")
+            else:
+                logs.append(f"Warning: Failed to set {ctrl_file} -> auto.")
+        except Exception:
+            _write_sysfs(ctrl_file, "auto")
+
+    parent_bridge_addr = dgpu.sysfs_path.resolve().parent.name
+    parent_ctrl = Path(f"/sys/bus/pci/devices/{parent_bridge_addr}/power/control")
+    if parent_ctrl.exists():
+        try:
+            if parent_ctrl.read_text().strip() == "auto":
+                logs.append(f"Parent bridge {parent_bridge_addr} already 'auto'.")
+            elif _write_sysfs(parent_ctrl, "auto"):
+                logs.append(f"Set parent bridge {parent_bridge_addr} power/control -> auto.")
+            else:
+                logs.append(f"Warning: Failed to set parent bridge {parent_bridge_addr} -> auto.")
+        except Exception:
+            _write_sysfs(parent_ctrl, "auto")
+
+    # 6. Active verification polling loop (up to 7s to cover 5s autosuspend delay)
+    import time
+    for _ in range(28):  # 28 * 0.25s = 7.0s
+        time.sleep(0.25)
+        status = _read_trimmed(dgpu.sysfs_path / "power" / "runtime_status")
+        state = _read_trimmed(dgpu.sysfs_path / "power_state")
+        if status == "suspended" or state == "D3cold":
+            return True, f"dGPU successfully suspended to D3cold (status={status}, state={state}).", logs
+
+    status = _read_trimmed(dgpu.sysfs_path / "power" / "runtime_status")
+    state = _read_trimmed(dgpu.sysfs_path / "power_state")
+
+    # Check kernel logs for GSP firmware wedge
+    try:
+        dmesg_check = subprocess.run(["dmesg", "--since", "5 minutes ago"], capture_output=True, text=True, timeout=1.0)
+        if "NV_ERR_RESET_REQUIRED" in dmesg_check.stdout or "Error while waiting for GPU progress" in dmesg_check.stdout:
+            logs.append("Kernel warning: NVIDIA GSP firmware is wedged (NV_ERR_RESET_REQUIRED). A reboot is required to reset the GPU processor.")
+    except Exception:
+        pass
+
+    return False, f"dGPU remains {status} ({state}).", logs

@@ -1,0 +1,77 @@
+#!/usr/bin/env bash
+# Power profile switcher for Lenovo LOQ 15IAX9E: Battery (<15W) vs AC Default vs Gaming (Full Speed)
+
+set -e
+
+MODE="${1:-auto}"
+AC_ONLINE=$(cat /sys/class/power_supply/ADP0/online 2>/dev/null || cat /sys/class/power_supply/ACAD/online 2>/dev/null || echo "0")
+PROFILE_NODE="/sys/devices/platform/legion/platform-profile/platform-profile-0/profile"
+FULLSPEED_NODE="/sys/devices/platform/legion/fan_fullspeed"
+
+_write_legion() {
+    sudo -n /usr/local/bin/omalegion-write write "$1" "$2" > /dev/null 2>&1 || true
+}
+
+_apply_cpu() {
+    if command -v ryoku-power >/dev/null 2>&1; then
+        sudo -n /usr/local/bin/ryoku-power apply-profile "$1" > /dev/null 2>&1 || true
+    fi
+}
+
+if [ "$MODE" = "game" ] || [ "$MODE" = "full" ] || [ "$MODE" = "custom" ]; then
+    echo "🎮 Switching to GAMING / MAXIMUM PERFORMANCE MODE"
+    
+    # 1. CPU profile to performance via ryoku-power
+    _apply_cpu "performance"
+    
+    # 2. Switch Lenovo profile to custom (required for fan_fullspeed)
+    _write_legion "$PROFILE_NODE" "custom"
+    
+    # 3. Turn on full speed fan (5600 RPM max hardware speed)
+    _write_legion "$FULLSPEED_NODE" "1"
+    
+    echo "✅ Gaming mode active: EPP performance, Fan MAX (5600 RPM)."
+    exit 0
+fi
+
+if [ "$AC_ONLINE" = "1" ] || [ "$MODE" = "ac" ] || [ "$MODE" = "balance" ]; then
+    echo "⚡ AC Power detected -> Restoring DEFAULT / NORMAL STATE"
+    
+    # 1. Restore CPU energy performance preference to balanced
+    _apply_cpu "balanced"
+    
+    # 2. Restore normal auto fan control
+    _write_legion "$FULLSPEED_NODE" "0"
+    
+    # 3. Restore Lenovo Platform Profile to balanced
+    _write_legion "$PROFILE_NODE" "balanced"
+    
+    echo "✅ System restored to normal balanced state."
+
+else
+    echo "🔋 Battery detected -> Applying DEEP POWER SAVING (<15W Target)"
+    
+    # 1. CPU profile to power-saver
+    _apply_cpu "power-saver"
+    
+    # 2. Turn off full speed fan forcing
+    _write_legion "$FULLSPEED_NODE" "0"
+    
+    # 3. Set Lenovo Platform Profile to low-power (Quiet Mode)
+    _write_legion "$PROFILE_NODE" "low-power"
+    
+    # 4. Do not blindly force 'auto' on PCI buses that break input devices (I2C host controller 0000:00:15.*) or dGPU (0000:01:00.0)
+    # The touchpad host controller must remain ON so touches are registered.
+    _write_legion "/sys/bus/pci/devices/0000:00:15.0/power/control" "on"
+    _write_legion "/sys/bus/pci/devices/0000:00:15.1/power/control" "on"
+    
+    echo "✅ Battery power saving active."
+    
+    # Show current discharge rate
+    sleep 1
+    if [ -f /sys/class/power_supply/BAT0/power_now ]; then
+        NOW=$(cat /sys/class/power_supply/BAT0/power_now)
+        WATTS=$(awk "BEGIN {printf \"%.2f\", $NOW/1000000}")
+        echo "📊 Current Battery Draw: ${WATTS} W"
+    fi
+fi

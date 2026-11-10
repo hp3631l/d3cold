@@ -189,23 +189,28 @@ def get_nvidia_client_processes() -> list[dict]:
     return deduped
 
 
-def get_battery_energy_rate() -> Optional[float]:
-    """Read the current system battery discharge rate in Watts."""
+def get_battery_energy_rate() -> Tuple[Optional[float], str]:
+    """Read the current system battery power rate in Watts and power status ('Discharging', 'Charging', 'Full', 'AC')."""
     for bat in glob.glob("/sys/class/power_supply/BAT*"):
         bat_path = Path(bat)
+        status_file = bat_path / "status"
+        status = _read_trimmed(status_file) if status_file.exists() else "Unknown"
         power_file = bat_path / "power_now"
         current_file = bat_path / "current_now"
         voltage_file = bat_path / "voltage_now"
         try:
+            val = None
             if power_file.exists():
-                return int(power_file.read_text().strip()) / 1e6
-            if current_file.exists() and voltage_file.exists():
+                val = int(power_file.read_text().strip()) / 1e6
+            elif current_file.exists() and voltage_file.exists():
                 c = int(current_file.read_text().strip())
                 v = int(voltage_file.read_text().strip())
-                return (c * v) / 1e12
+                val = (c * v) / 1e12
+            if val is not None:
+                return val, status
         except (ValueError, OSError):
             pass
-    return None
+    return None, "AC"
 
 
 def get_cpu_package_power(duration: float = 0.5) -> Optional[float]:

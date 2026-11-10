@@ -41,10 +41,18 @@ def run_monitor(interval: float = 1.0, duration: float | None = None) -> None:
         while True:
             now_str = datetime.now().strftime("%H:%M:%S")
             current_status = dgpu.runtime_status
-            watts = get_battery_energy_rate()
+            watts, bat_status = get_battery_energy_rate()
             cpu_w = get_cpu_package_power(0.2)
 
-            watt_str = f" | Battery: {watts:.1f}W" if watts is not None else ""
+            if watts is not None:
+                if bat_status.lower() == "charging":
+                    watt_str = f" | Bat: +{watts:.1f}W (Charging)"
+                elif bat_status.lower() == "full":
+                    watt_str = " | AC (Full)"
+                else:
+                    watt_str = f" | Battery: {watts:.1f}W"
+            else:
+                watt_str = " | AC"
             cpu_str = f" | CPU Pkg: {cpu_w:.1f}W" if cpu_w is not None else ""
 
             # Check for transitions

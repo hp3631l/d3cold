@@ -12,6 +12,7 @@ from .monitor import run_monitor
 from .pci import find_nvidia_dgpu, get_battery_energy_rate
 from .remediate import (
     apply_live_power_control,
+    are_system_rules_installed,
     fix_btop,
     fix_compositor_env,
     fix_system_rules,
@@ -36,7 +37,14 @@ def cmd_audit(_args: argparse.Namespace) -> int:
     print(f"{BOLD}Runtime Status:{RESET}    {status_color}{report.runtime_status}{RESET}")
     print(f"{BOLD}PCI Power Control:{RESET} {report.power_control}")
     if report.battery_watts is not None:
-        print(f"{BOLD}Battery Discharge:{RESET} {report.battery_watts:.2f} W")
+        if report.battery_status.lower() == "charging":
+            print(f"{BOLD}Battery Charge Rate:{RESET} +{report.battery_watts:.2f} W (AC Connected)")
+        elif report.battery_status.lower() == "full":
+            print(f"{BOLD}Power Status:{RESET}       Full (AC Connected)")
+        else:
+            print(f"{BOLD}Battery Discharge:{RESET} {report.battery_watts:.2f} W")
+    else:
+        print(f"{BOLD}Power Status:{RESET}       AC Connected")
     print("\n" + "=" * 50 + "\n")
 
     for f in report.findings:
@@ -89,17 +97,41 @@ def cmd_fix(args: argparse.Namespace) -> int:
     badge = f"{GREEN}✓{RESET}" if success else f"{RED}✗{RESET}"
     print(f"[{badge}] Game Offloader: {msg}")
 
-    # 5. System rules (requires sudo if selected)
-    if args.system or args.all:
+    # 5. System rules
+    if are_system_rules_installed():
+        print(f"[{GREEN}✓{RESET}] System Rules: RTD3 udev & modprobe configurations are already active.")
+    elif args.system or args.all:
         print(f"\nDeploying system-wide udev and modprobe rules (sudo required)...")
         for success, msg in fix_system_rules():
             badge = f"{GREEN}✓{RESET}" if success else f"{RED}✗{RESET}"
             print(f"[{badge}] System Rules: {msg}")
     else:
-        print(f"\n{CYAN}Note:{RESET} To deploy system-wide udev & modprobe RTD3 rules, run with `--system` or `sudo dgpu-doctor fix --all`.")
+        print(f"\n{CYAN}Note:{RESET} RTD3 rules not detected. Run with `--system` or `--all` to deploy.")
+
+    # 6. Active Suspension
+    force = getattr(args, "force", False)
+    print(f"\n{BOLD}Initiating dGPU Sleep Transition...{RESET}")
+    from .remediate import suspend_dgpu
+    ok, msg, logs = suspend_dgpu(force=force)
+    for line in logs:
+        print(f"  • {line}")
+    badge = f"{GREEN}✓{RESET}" if ok else f"{YELLOW}⚠{RESET}"
+    print(f"[{badge}] Suspension Result: {msg}")
 
     print(f"\n{GREEN}{BOLD}Remediation complete.{RESET} Run `dgpu-doctor audit` or `dgpu-doctor watch` to verify.\n")
-    return 0
+    return 0 if ok else 1
+
+
+def cmd_suspend(args: argparse.Namespace) -> int:
+    """Actively suspend the dGPU into D3cold."""
+    print(f"\n{BOLD}{CYAN}=== Forcing dGPU into D3cold Sleep ==={RESET}\n")
+    from .remediate import suspend_dgpu
+    ok, msg, logs = suspend_dgpu(force=args.force)
+    for line in logs:
+        print(f"  • {line}")
+    badge = f"{GREEN}✓{RESET}" if ok else f"{RED}✗{RESET}"
+    print(f"\n[{badge}] {msg}\n")
+    return 0 if ok else 1
 
 
 def cmd_watch(args: argparse.Namespace) -> int:
@@ -146,10 +178,15 @@ def main() -> int:
     # audit
     subparsers.add_parser("audit", help="Run 5-layer diagnostic audit (default)")
 
+    # suspend
+    suspend_p = subparsers.add_parser("suspend", help="Actively suspend dGPU into D3cold (0.0 W)")
+    suspend_p.add_argument("-f", "--force", action="store_true", help="Terminate any client processes holding /dev/nvidia*")
+
     # fix
     fix_p = subparsers.add_parser("fix", help="Apply automated fixes for btop, compositor, and rules")
     fix_p.add_argument("--system", action="store_true", help="Install /etc/udev and /etc/modprobe rules via sudo")
     fix_p.add_argument("--all", action="store_true", help="Apply all fixes including system-wide rules")
+    fix_p.add_argument("-f", "--force", action="store_true", help="Terminate any client processes holding /dev/nvidia*")
 
     # watch
     watch_p = subparsers.add_parser("watch", aliases=["monitor"], help="Passive live monitor with wake detection")
@@ -164,6 +201,8 @@ def main() -> int:
     args = parser.parse_args()
     if not args.command or args.command == "audit":
         return cmd_audit(args)
+    elif args.command == "suspend":
+        return cmd_suspend(args)
     elif args.command == "fix":
         return cmd_fix(args)
     elif args.command in ("watch", "monitor"):
