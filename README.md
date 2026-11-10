@@ -38,6 +38,31 @@ flowchart TD
 
 ---
 
+## 📋 Prerequisites
+
+Before installing `dgpu-doctor`, ensure your system meets the following hardware and software requirements:
+
+### 1. Hardware Requirements
+* **Laptop Architecture:** Hybrid graphics laptop (Intel iGPU + NVIDIA dGPU or AMD APU + NVIDIA dGPU).
+* **Supported dGPU:** Turing (RTX 20-series / GTX 16-series), Ampere (RTX 30-series), Ada Lovelace (RTX 40-series), or newer with hardware Runtime D3 (`RTD3`) support.
+* **Display Output:** Internal panel driven by iGPU (Hybrid/Optimus mode). External monitor HDMI/Type-C ports wired directly to the dGPU will keep the dGPU awake when connected.
+
+### 2. Software & Kernel Requirements
+* **Linux Kernel:** 5.10 or newer (tested on 6.x and 7.x kernels).
+* **NVIDIA Proprietary Driver:** Version 470.xx or newer (550.xx+ recommended for RTX 30/40 Ada GSP firmware).
+* **Python Runtime:** Python 3.8+ (standard library only; no external pip dependencies required).
+* **System Utilities:**
+  * `udev` / `systemd` (for persistent power management rules).
+  * `bash` (for installation and runner scripts).
+  * `pciutils` (`lspci`) or `udevadm` (for hardware device enumeration).
+  * `util-linux` (`lsof` or `fuser` for process and file descriptor tracking).
+
+### 3. Permissions
+* Standard user account for running diagnostics (`audit`), live monitoring (`watch`), and user-level environment fixes.
+* `sudo` privileges are required only once when deploying system-wide udev and modprobe rules (`dgpu-doctor fix --system` or `--all`).
+
+---
+
 ## 🚀 Features
 
 - **🔍 5-Layer Deep Audit (`dgpu-doctor audit`)**:
@@ -46,11 +71,13 @@ flowchart TD
   - Verifies `/etc/udev/rules.d/80-nvidia-pm.rules` and `NVreg_DynamicPowerManagement`.
   - Scans `/proc` for open `/dev/nvidia*` file descriptors and compositor EGL leaks.
   - Detects rogue polling configurations in `btop.conf` and status bar scripts.
+  - Reads live battery charge vs. discharge status without mislabeling AC charging current.
 - **🛠️ Automated 1-Click Remediation (`dgpu-doctor fix`)**:
   - Automatically pins compositor environment variables (`__EGL_VENDOR_LIBRARY_FILENAMES=50_mesa.json`).
   - Optimizes `btop.conf` to monitor iGPU only without NVML PCIe polling.
   - Generates and deploys persistent udev rules and modprobe RTD3 configuration.
   - Installs the high-performance on-demand gaming wrapper `prime-run`.
+  - Automatically installs and configures `power-profile-switch` for automated power scaling.
 - **📊 Zero-Wake Live Monitor (`dgpu-doctor watch`)**:
   - Real-time ticker showing dGPU state (`SUSPENDED` vs `ACTIVE`), system wattage, and CPU package power.
   - **Does NOT wake the GPU**: Queries generic Linux PCI sysfs only, avoiding driver wakes.
@@ -65,14 +92,14 @@ flowchart TD
 
 ### Option 1: Standalone Installer (All Linux Distributions)
 ```bash
-git clone https://github.com/hariprakash/dgpu-sleep-doctor.git
+git clone https://github.com/hp3631l/dgpu-sleep-doctor.git
 cd dgpu-sleep-doctor
 ./install.sh
 ```
 
 ### Option 2: Arch Linux (PKGBUILD)
 ```bash
-git clone https://github.com/hariprakash/dgpu-sleep-doctor.git
+git clone https://github.com/hp3631l/dgpu-sleep-doctor.git
 cd dgpu-sleep-doctor
 makepkg -si
 ```
@@ -98,7 +125,7 @@ dgpu-doctor audit
 Target dGPU:       AD107M [GeForce RTX 4050 Max-Q / Mobile] (0000:01:00.0)
 Runtime Status:    suspended
 PCI Power Control: auto
-Battery Discharge: 11.80 W
+Battery Discharge: 17.18 W
 
 ==================================================
 
@@ -110,6 +137,8 @@ Battery Discharge: 11.80 W
 [✓ PASS] Compositor EGL: Compositor EGL vendor pinned to Mesa
 [✓ PASS] Terminal Monitors: btop configuration is optimized for iGPU only
 [✓ PASS] Active Clients: No active processes holding /dev/nvidia*
+[✓ PASS] Persistence Daemon: nvidia-persistenced is not running
+[✓ PASS] PCIe Root Port: Parent PCIe bridge 0000:00:01.0 is set to 'auto'
 
 All checks passed! Your dGPU is entering D3cold properly.
 ```
@@ -131,12 +160,14 @@ dgpu-doctor watch
 ```
 *Example live output:*
 ```text
-[00:15:22] dGPU: ● SUSPENDED (0.0W) | Battery: 12.1W | CPU Pkg: 3.4W
+[17:29:24] dGPU: ● ACTIVE | Battery: 26.8W | CPU Pkg: 6.3W
+[17:29:29] 💤 SLEEP: returned to D3cold suspended
+[17:29:29] dGPU: ● SUSPENDED (0.0W) | Battery: 17.2W | CPU Pkg: 4.5W
 ```
 If an application launches and wakes the GPU, `dgpu-doctor` immediately reports:
 ```text
-[00:16:04] ⚠️  WAKEUP: suspended -> active -> Culprit: heroic (PID 14210)
-[00:25:18] 💤 SLEEP: returned to D3cold suspended (after 554.0s active)
+[18:16:04] ⚠️  WAKEUP: suspended -> active -> Culprit: heroic (PID 14210)
+[18:25:18] 💤 SLEEP: returned to D3cold suspended (after 554.0s active)
 ```
 
 ### 4. Gaming On-Demand with PRIME Offload
@@ -148,6 +179,13 @@ prime-run vkcube
 ```
 The GPU powers on instantly, runs the game at full speed, and drops back to `0.0W` automatically 3–5 seconds after quitting.
 
+### 5. Automated Power Profile Switcher (`power-profile-switch`)
+Included in the repo and installed by default:
+```bash
+power-profile-switch          # Automatically detects Battery vs AC and sets target
+power-profile-switch game     # Switches to Maximum Gaming performance with Max Fan Speed
+```
+
 ---
 
 ## 🔧 Technical Details: The Golden Rules of Linux dGPU Sleep
@@ -156,6 +194,7 @@ The GPU powers on instantly, runs the game at full speed, and drops back to `0.0
 2. **Never read `/sys/class/drm/card*-*/status` on discrete cards**: Querying connector `status` triggers kernel DRM hardware `.detect()` DDC probes across the physical HDMI/DP ports. Read `enabled` instead.
 3. **Never run `lspci` in periodic polling scripts**: `lspci` accesses PCI configuration space registers, preventing the PCI bus from entering L2/L3 low-power states.
 4. **Always unbind the NVIDIA Audio device (`0x040300`)**: If WirePlumber opens the HDMI audio interface, the shared physical chip cannot cut power rails.
+5. **Protect input host controllers from blanket PCI runtime PM loops**: Never write `auto` to Serial IO I2C controllers (e.g. `0000:00:15.*`), or the kernel will power down the touchpad bus.
 
 ---
 
