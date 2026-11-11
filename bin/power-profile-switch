@@ -114,8 +114,8 @@ else
     # The touchpad host controller must remain ON so touches are registered.
     _write_legion "/sys/bus/pci/devices/0000:00:15.0/power/control" "on"
     _write_legion "/sys/bus/pci/devices/0000:00:15.1/power/control" "on"
-    # Root port for dGPU must remain ON to avoid cold wake link timeouts
-    _write_legion "/sys/bus/pci/devices/0000:00:01.0/power/control" "on"
+    # Root port for dGPU: auto on battery allows entry into D3cold (0.0W)
+    _write_legion "/sys/bus/pci/devices/0000:00:01.0/power/control" "auto"
     
     echo "✅ Deep battery power saving active."
     

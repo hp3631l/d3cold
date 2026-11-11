@@ -106,7 +106,12 @@ def fix_compositor_env() -> List[Tuple[bool, str]]:
     env_file = env_dir / "10-hyprland-gpu.conf"
     try:
         env_dir.mkdir(parents=True, exist_ok=True)
-        content = f"{intel_val}\n"
+        content = (
+            f"{intel_val}\n"
+            "__EGL_VENDOR_LIBRARY_FILENAMES=/usr/share/glvnd/egl_vendor.d/50_mesa.json\n"
+            "VK_DRIVER_FILES=/usr/share/vulkan/icd.d/intel_icd.x86_64.json\n"
+            "LIBVA_DRIVER_NAME=iHD\n"
+        )
         env_file.write_text(content)
         results.append((True, f"Updated {env_file}"))
     except Exception as e:
@@ -121,7 +126,12 @@ def fix_compositor_env() -> List[Tuple[bool, str]]:
         if uwsm_file.exists():
             prefixes = ("export AQ_DRM_DEVICES", "export __EGL_VENDOR_LIBRARY_FILENAMES", "export VK_DRIVER_FILES", "export LIBVA_DRIVER_NAME")
             lines = [l for l in uwsm_file.read_text().splitlines() if not any(l.startswith(p) for p in prefixes)]
-        lines.append(f"export {intel_val}")
+        lines.extend([
+            f"export {intel_val}",
+            "export __EGL_VENDOR_LIBRARY_FILENAMES=/usr/share/glvnd/egl_vendor.d/50_mesa.json",
+            "export VK_DRIVER_FILES=/usr/share/vulkan/icd.d/intel_icd.x86_64.json",
+            "export LIBVA_DRIVER_NAME=iHD",
+        ])
         uwsm_file.write_text("\n".join(lines) + "\n")
         results.append((True, f"Updated {uwsm_file}"))
     except Exception as e:
