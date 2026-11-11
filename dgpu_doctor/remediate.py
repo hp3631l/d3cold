@@ -95,11 +95,15 @@ def fix_btop() -> Tuple[bool, str]:
 
 def fix_compositor_env() -> List[Tuple[bool, str]]:
     """Configure environment files so Wayland compositors don't leak NVIDIA EGL fds."""
-    from .pci import find_igpu_drm_card
+    from .pci import find_igpu_drm_card, find_dgpu_drm_card
 
     results = []
     igpu_card = find_igpu_drm_card()
-    intel_val = f"AQ_DRM_DEVICES={igpu_card}"
+    dgpu_card = find_dgpu_drm_card()
+    if dgpu_card:
+        intel_val = f"AQ_DRM_DEVICES={igpu_card}:{dgpu_card}"
+    else:
+        intel_val = f"AQ_DRM_DEVICES={igpu_card}"
 
     # 1. ~/.config/environment.d/10-hyprland-gpu.conf
     env_dir = Path.home() / ".config/environment.d"

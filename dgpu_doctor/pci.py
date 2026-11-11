@@ -167,6 +167,23 @@ def find_igpu_drm_card() -> str:
     return "/dev/dri/card2"
 
 
+def find_dgpu_drm_card() -> Optional[str]:
+    """Find the DRI card device path for the discrete NVIDIA GPU (e.g. /dev/dri/card1)."""
+    dgpu = find_nvidia_dgpu()
+    if dgpu:
+        by_path = Path(f"/dev/dri/by-path/pci-{dgpu.pci_address}-card")
+        if by_path.exists():
+            try:
+                return str(by_path.resolve())
+            except OSError:
+                pass
+        drm_dir = dgpu.sysfs_path / "drm"
+        if drm_dir.exists():
+            for card in sorted(drm_dir.glob("card*")):
+                return f"/dev/dri/{card.name}"
+    return None
+
+
 def find_nvidia_audio() -> Optional[Path]:
     """Find the NVIDIA HDMI/DP Audio controller function (0x040300) on the same slot."""
     base = Path("/sys/bus/pci/devices")
