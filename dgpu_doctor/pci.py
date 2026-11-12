@@ -201,12 +201,18 @@ def get_nvidia_client_processes() -> list[dict]:
     """Find processes holding open file descriptors to /dev/nvidia* or /dev/dri render nodes.
 
     Scans /proc directly without calling nvidia-smi or opening devices.
+    Compositors (Hyprland, Xwayland, etc.) holding DRM nodes for KMS display hotplug
+    do not prevent D3cold and are not flagged as rogue blocking clients.
     """
     clients = []
+    compositor_comms = {"hyprland", "xwayland", "sway", "kwin", "gnome-shell", "mutter", "wayfire"}
     for fd_path in glob.glob("/proc/[0-9]*/fd/*"):
         try:
             target = os.readlink(fd_path)
-            if target.startswith("/dev/nvidia") or target.startswith("/dev/dri/renderD128") or target.startswith("/dev/dri/card1"):
+            is_nvidia_char = target.startswith("/dev/nvidia")
+            is_render_node = target.startswith("/dev/dri/renderD128")
+
+            if is_nvidia_char or is_render_node:
                 pid = fd_path.split("/")[2]
                 try:
                     with open(f"/proc/{pid}/cmdline", "rb") as cf:
@@ -215,6 +221,10 @@ def get_nvidia_client_processes() -> list[dict]:
                         comm = cmf.read().strip()
                 except OSError:
                     cmd, comm = "unknown", "unknown"
+
+                if is_render_node and comm.lower() in compositor_comms:
+                    continue
+
                 clients.append({
                     "pid": int(pid),
                     "comm": comm,

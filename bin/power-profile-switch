@@ -39,8 +39,7 @@ if [ "$MODE" = "game" ] || [ "$MODE" = "full" ] || [ "$MODE" = "custom" ]; then
         iw dev "$WIFI_IFACE" set power_save off 2>/dev/null || true
     fi
 
-    # 4. PCIe performance (SSD, WiFi, Ethernet on)
-    _write_legion "/sys/bus/pci/devices/0000:06:00.0/power/control" "on"
+    # 4. PCIe performance (WiFi, Ethernet on)
     _write_legion "/sys/bus/pci/devices/0000:00:14.3/power/control" "on"
     _write_legion "/sys/bus/pci/devices/0000:00:15.0/power/control" "on"
     _write_legion "/sys/bus/pci/devices/0000:00:15.1/power/control" "on"
@@ -76,8 +75,7 @@ if [ "$AC_ONLINE" = "1" ] || [ "$MODE" = "ac" ] || [ "$MODE" = "balance" ]; then
         iw dev "$WIFI_IFACE" set power_save off 2>/dev/null || true
     fi
 
-    # 6. Restore PCIe performance on AC (NVMe & WiFi)
-    _write_legion "/sys/bus/pci/devices/0000:06:00.0/power/control" "on"
+    # 6. Restore PCIe performance on AC (WiFi)
     _write_legion "/sys/bus/pci/devices/0000:00:14.3/power/control" "on"
     _write_legion "/sys/bus/pci/devices/0000:00:15.0/power/control" "on"
     _write_legion "/sys/bus/pci/devices/0000:00:15.1/power/control" "on"
@@ -105,17 +103,16 @@ else
         iw dev "$WIFI_IFACE" set power_save on 2>/dev/null || true
     fi
 
-    # 6. Enable runtime PM on non-critical PCIe devices (Ethernet, NVMe SSD, WiFi)
+    # 6. Enable runtime PM on non-critical PCIe devices (Ethernet, WiFi)
     _write_legion "/sys/bus/pci/devices/0000:07:00.0/power/control" "auto"
-    _write_legion "/sys/bus/pci/devices/0000:06:00.0/power/control" "auto"
     _write_legion "/sys/bus/pci/devices/0000:00:14.3/power/control" "auto"
 
-    # 7. Protect input devices & PCIe root port stability
-    # The touchpad host controller must remain ON so touches are registered.
+    # 7. Protect critical host controllers and buses
+    # Touchpad I2C controllers must remain ON
     _write_legion "/sys/bus/pci/devices/0000:00:15.0/power/control" "on"
     _write_legion "/sys/bus/pci/devices/0000:00:15.1/power/control" "on"
-    # Root port for dGPU: auto on battery allows entry into D3cold (0.0W)
-    _write_legion "/sys/bus/pci/devices/0000:00:01.0/power/control" "auto"
+    # Root port for dGPU must remain ON to avoid link timeouts and shutdown hangs
+    _write_legion "/sys/bus/pci/devices/0000:00:01.0/power/control" "on"
     
     echo "✅ Deep battery power saving active."
     
