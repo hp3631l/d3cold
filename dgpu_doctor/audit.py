@@ -90,7 +90,7 @@ def run_audit() -> AuditReport:
                 status="FAIL",
                 title=f"dGPU is stuck awake ({dgpu.runtime_status})",
                 details=f"Device {dgpu.pci_address} is powered up in state '{dgpu.runtime_status}'.",
-                remediation="Run `dgpu-doctor fix` to apply RTD3 udev rules, compositor environment, and terminate wake loops.",
+                remediation="Run `d3cold fix` to apply RTD3 udev rules, compositor environment, and terminate wake loops.",
             )
         )
 
@@ -256,7 +256,7 @@ def run_audit() -> AuditReport:
                 status="WARN",
                 title="__EGL_VENDOR_LIBRARY_FILENAMES is unpinned",
                 details="libglvnd will probe 10_nvidia.json on compositor start, leaving open file descriptors to /dev/nvidia0.",
-                remediation="Run `dgpu-doctor fix` to isolate compositor EGL to Mesa.",
+                remediation="Run `d3cold fix` to isolate compositor EGL to Mesa.",
             )
         )
 
@@ -278,7 +278,7 @@ def run_audit() -> AuditReport:
                     status="FAIL",
                     title="btop is configured to poll NVIDIA via NVML",
                     details=f"In {btop_conf}, shown_gpus or nvml_measure_pcie_speeds queries the RTX card every 500ms, preventing sleep.",
-                    remediation="Run `dgpu-doctor fix` to set shown_gpus = 'intel' and nvml_measure_pcie_speeds = false.",
+                    remediation="Run `d3cold fix` to set shown_gpus = 'intel' and nvml_measure_pcie_speeds = false.",
                 )
             )
         else:
@@ -328,7 +328,7 @@ def run_audit() -> AuditReport:
                 status="FAIL",
                 title="nvidia-persistenced is active (inhibits D3cold sleep)",
                 details="NVIDIA Persistence Daemon keeps the driver context initialized in VRAM 24/7, preventing runtime D3cold.",
-                remediation="Run `dgpu-doctor fix` or `sudo systemctl disable --now nvidia-persistenced`.",
+                remediation="Run `d3cold fix` or `sudo systemctl disable --now nvidia-persistenced`.",
             )
         )
     else:
@@ -362,7 +362,7 @@ def run_audit() -> AuditReport:
                     status="FAIL",
                     title=f"Parent PCIe bridge {parent_bridge.name} is '{parent_ctrl}' (inhibiting D3cold)",
                     details=f"{parent_ctrl_file} must be 'auto'. When set to 'on', the upstream PCIe root port is forced to D0 active, keeping the bus link energized and trapping the NVIDIA dGPU in D3hot (~14 W phantom draw).",
-                    remediation="Run `dgpu-doctor fix` to set parent bridge to 'auto'.",
+                    remediation="Run `d3cold fix` to set parent bridge to 'auto'.",
                 )
             )
 

@@ -3,7 +3,7 @@ requires = ["setuptools>=61.0"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "dgpu-sleep-doctor"
+name = "d3cold"
 version = "1.0.0"
 authors = [
   { name="hp3631l" }
@@ -21,4 +21,5 @@ classifiers = [
 ]
 
 [project.scripts]
+d3cold = "dgpu_doctor.cli:main"
 dgpu-doctor = "dgpu_doctor.cli:main"

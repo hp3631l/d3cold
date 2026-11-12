@@ -1,4 +1,4 @@
-# dGPU Sleep Doctor (`dgpu-doctor`) 🩺⚡
+# d3cold 🩺⚡
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](https://opensource.org/licenses/MIT)
 [![Platform](https://img.shields.io/badge/Platform-Linux%20%7C%20Wayland%20%7C%20X11-purple.svg)]()
@@ -65,20 +65,20 @@ Before installing `dgpu-doctor`, ensure your system meets the following hardware
 
 ## 🚀 Features
 
-- **🔍 5-Layer Deep Audit (`dgpu-doctor audit`)**:
+- **🔍 5-Layer Deep Audit (`d3cold audit`)**:
   - Checks live PCI power states (`runtime_status`, `control`, `D3cold`).
   - Audits NVIDIA multifunction audio controller unbind state.
   - Verifies `/etc/udev/rules.d/80-nvidia-pm.rules` and `NVreg_DynamicPowerManagement`.
   - Scans `/proc` for open `/dev/nvidia*` file descriptors and compositor EGL leaks.
   - Detects rogue polling configurations in `btop.conf` and status bar scripts.
   - Reads live battery charge vs. discharge status without mislabeling AC charging current.
-- **🛠️ Automated 1-Click Remediation (`dgpu-doctor fix`)**:
+- **🛠️ Automated 1-Click Remediation (`d3cold fix`)**:
   - Automatically pins compositor environment variables (`__EGL_VENDOR_LIBRARY_FILENAMES=50_mesa.json`).
   - Optimizes `btop.conf` to monitor iGPU only without NVML PCIe polling.
   - Generates and deploys persistent udev rules and modprobe RTD3 configuration.
   - Installs the high-performance on-demand gaming wrapper `prime-run`.
   - Automatically installs and configures `power-profile-switch` for automated power scaling.
-- **📊 Zero-Wake Live Monitor (`dgpu-doctor watch`)**:
+- **📊 Zero-Wake Live Monitor (`d3cold watch`)**:
   - Real-time ticker showing dGPU state (`SUSPENDED` vs `ACTIVE`), system wattage, and CPU package power.
   - **Does NOT wake the GPU**: Queries generic Linux PCI sysfs only, avoiding driver wakes.
   - **Instant Culprit Detection**: When a wake event occurs, it identifies the exact process (PID & command line) responsible.
@@ -116,11 +116,11 @@ pip install --user .
 ### 1. Diagnose Your Laptop (`audit`)
 Run a comprehensive diagnostic check:
 ```bash
-dgpu-doctor audit
+d3cold audit
 ```
 *Sample output:*
 ```text
-=== dGPU Sleep Doctor Diagnostics ===
+=== d3cold Diagnostics ===
 
 Target dGPU:       AD107M [GeForce RTX 4050 Max-Q / Mobile] (0000:01:00.0)
 Runtime Status:    suspended
@@ -138,7 +138,7 @@ Battery Discharge: 17.18 W
 [✓ PASS] Terminal Monitors: btop configuration is optimized for iGPU only
 [✓ PASS] Active Clients: No active processes holding /dev/nvidia*
 [✓ PASS] Persistence Daemon: nvidia-persistenced is not running
-[✓ PASS] PCIe Root Port: Parent PCIe bridge 0000:00:01.0 is set to 'on' (link retraining safe)
+[✓ PASS] PCIe Root Port: Parent PCIe bridge 0000:00:01.0 is set to 'auto'
 
 All checks passed! Your dGPU is entering D3cold properly.
 ```
@@ -146,17 +146,17 @@ All checks passed! Your dGPU is entering D3cold properly.
 ### 2. Auto-Fix Power Drain Issues (`fix`)
 Apply all user-space optimizations (btop, compositor environment, live power control, prime-run):
 ```bash
-dgpu-doctor fix
+d3cold fix
 ```
 To deploy persistent system-wide udev and modprobe rules:
 ```bash
-sudo dgpu-doctor fix --all
+sudo d3cold fix --all
 ```
 
 ### 3. Real-Time Zero-Wake Monitor (`watch`)
 Watch your GPU sleep state and power draw live in your terminal:
 ```bash
-dgpu-doctor watch
+d3cold watch
 ```
 *Example live output:*
 ```text

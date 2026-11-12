@@ -1,31 +1,40 @@
 #!/usr/bin/env bash
-# dgpu-doctor standalone user installer
+# d3cold standalone user installer
 
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 BIN_DIR="${HOME}/.local/bin"
+SHARE_DIR="${HOME}/.local/share/d3cold"
 
-echo "=== Installing dgpu-doctor & power-profile-switch ==="
+echo "=== Installing d3cold & power-profile-switch ==="
 
-mkdir -p "${BIN_DIR}"
+mkdir -p "${BIN_DIR}" "${SHARE_DIR}"
 
-# Install launcher script
-cat << 'EOF' > "${BIN_DIR}/dgpu-doctor"
+# Install python package to ~/.local/share/d3cold
+cp -r "${SCRIPT_DIR}/dgpu_doctor" "${SHARE_DIR}/"
+
+# Maintain backwards compatibility for ~/.local/share/dgpu-doctor
+if [ "${HOME}/.local/share/dgpu-doctor" != "${SHARE_DIR}" ]; then
+    rm -rf "${HOME}/.local/share/dgpu-doctor"
+    ln -sf "${SHARE_DIR}" "${HOME}/.local/share/dgpu-doctor"
+fi
+
+# Install launcher script for d3cold
+cat << 'EOF' > "${BIN_DIR}/d3cold"
 #!/usr/bin/env bash
-SCRIPT_DIR="$(cd "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")/../share/dgpu-doctor" 2>/dev/null || cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-if [ -d "${HOME}/.local/share/dgpu-doctor" ]; then
+if [ -d "${HOME}/.local/share/d3cold" ]; then
+    PYTHONPATH="${HOME}/.local/share/d3cold" exec python3 -m dgpu_doctor.cli "$@"
+elif [ -d "${HOME}/.local/share/dgpu-doctor" ]; then
     PYTHONPATH="${HOME}/.local/share/dgpu-doctor" exec python3 -m dgpu_doctor.cli "$@"
 else
     exec python3 -m dgpu_doctor.cli "$@"
 fi
 EOF
-chmod +x "${BIN_DIR}/dgpu-doctor"
+chmod +x "${BIN_DIR}/d3cold"
 
-# Copy python package to ~/.local/share/dgpu-doctor
-SHARE_DIR="${HOME}/.local/share/dgpu-doctor"
-mkdir -p "${SHARE_DIR}"
-cp -r "${SCRIPT_DIR}/dgpu_doctor" "${SHARE_DIR}/"
+# Maintain backwards compatibility for dgpu-doctor command
+ln -sf "${BIN_DIR}/d3cold" "${BIN_DIR}/dgpu-doctor"
 
 # Install prime-run
 if [ -f "${SCRIPT_DIR}/bin/prime-run" ]; then
@@ -50,12 +59,12 @@ if [ -f "${SCRIPT_DIR}/systemd/power-profile-watcher.service" ]; then
     echo "✓ Enabled power-profile-watcher.service for automatic AC/Battery switching"
 fi
 
-echo "✓ Installed dgpu-doctor to ${BIN_DIR}/dgpu-doctor"
+echo "✓ Installed d3cold to ${BIN_DIR}/d3cold (alias: dgpu-doctor)"
 echo "✓ Installed prime-run to ${BIN_DIR}/prime-run"
 echo ""
 echo "Make sure ${BIN_DIR} is in your PATH. You can now run:"
-echo "  dgpu-doctor audit           # Check health of NVIDIA dGPU power sleep"
-echo "  dgpu-doctor fix             # Automatically remediate issues"
-echo "  dgpu-doctor watch           # Real-time passive sleep monitor"
-echo "  power-profile-switch        # Smart battery/AC/gaming profile switcher"
+echo "  d3cold audit           # Check health of NVIDIA dGPU power sleep"
+echo "  d3cold fix             # Automatically remediate issues"
+echo "  d3cold watch           # Real-time passive sleep monitor"
+echo "  power-profile-switch   # Smart battery/AC/gaming profile switcher"
 echo ""

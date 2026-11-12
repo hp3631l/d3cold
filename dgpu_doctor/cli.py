@@ -29,7 +29,7 @@ CYAN = "\033[96m"
 
 def cmd_audit(_args: argparse.Namespace) -> int:
     """Run full diagnostic audit and print formatted report."""
-    print(f"\n{BOLD}{CYAN}=== dGPU Sleep Doctor Diagnostics ==={RESET}\n")
+    print(f"\n{BOLD}{CYAN}=== d3cold Diagnostics ==={RESET}\n")
 
     report = run_audit()
     print(f"{BOLD}Target dGPU:{RESET}       {report.dgpu_name} ({report.dgpu_pci})")
@@ -63,7 +63,7 @@ def cmd_audit(_args: argparse.Namespace) -> int:
 
     if report.has_failures:
         print(f"{RED}{BOLD}Diagnostics found issues preventing the dGPU from sleeping.{RESET}")
-        print("Run `dgpu-doctor fix` to automatically remediate them.\n")
+        print("Run `d3cold fix` to automatically remediate them.\n")
         return 1
     elif report.has_warnings:
         print(f"{YELLOW}Diagnostics passed with warnings.{RESET}\n")
@@ -75,7 +75,7 @@ def cmd_audit(_args: argparse.Namespace) -> int:
 
 def cmd_fix(args: argparse.Namespace) -> int:
     """Apply auto-remediations."""
-    print(f"\n{BOLD}{CYAN}=== Applying dGPU Sleep Doctor Remediations ==={RESET}\n")
+    print(f"\n{BOLD}{CYAN}=== Applying d3cold Remediations ==={RESET}\n")
 
     # 1. Live power control
     success, msg = apply_live_power_control()
@@ -118,7 +118,7 @@ def cmd_fix(args: argparse.Namespace) -> int:
     badge = f"{GREEN}✓{RESET}" if ok else f"{YELLOW}⚠{RESET}"
     print(f"[{badge}] Suspension Result: {msg}")
 
-    print(f"\n{GREEN}{BOLD}Remediation complete.{RESET} Run `dgpu-doctor audit` or `dgpu-doctor watch` to verify.\n")
+    print(f"\n{GREEN}{BOLD}Remediation complete.{RESET} Run `d3cold audit` or `d3cold watch` to verify.\n")
     return 0 if ok else 1
 
 
@@ -176,8 +176,9 @@ def cmd_daemon(_args: argparse.Namespace) -> int:
 
 
 def main() -> int:
+    cmd_name = "dgpu-doctor" if sys.argv and "dgpu-doctor" in sys.argv[0] else "d3cold"
     parser = argparse.ArgumentParser(
-        prog="dgpu-doctor",
+        prog=cmd_name,
         description="Diagnostics, auto-remediation, and zero-wake monitoring for hybrid NVIDIA laptops.",
     )
     subparsers = parser.add_subparsers(dest="command", help="Available subcommands")

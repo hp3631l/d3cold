@@ -27,7 +27,7 @@ def run_monitor(interval: float = 1.0, duration: float | None = None) -> None:
         return
 
     print("=================================================================")
-    print(" dGPU Sleep Doctor - Zero-Wake Live Monitor")
+    print(" d3cold - Zero-Wake Live Monitor")
     print(f" Target: {dgpu.name} ({dgpu.pci_address})")
     print(" Monitoring PCI runtime_status passively without waking device...")
     print(" Press Ctrl+C to exit.")
