@@ -8,15 +8,30 @@ AC_ONLINE=$(cat /sys/class/power_supply/ADP0/online 2>/dev/null || cat /sys/clas
 PROFILE_NODE="/sys/devices/platform/legion/platform-profile/platform-profile-0/profile"
 FULLSPEED_NODE="/sys/devices/platform/legion/fan_fullspeed"
 IGPU_MAX_FREQ_NODE="/sys/bus/pci/devices/0000:00:02.0/drm/card2/gt_max_freq_mhz"
+DGPU_STATUS_NODE="/sys/bus/pci/devices/0000:01:00.0/power/runtime_status"
 
+# Idempotent sysfs writer: skips redundant writes to prevent triggering Lenovo EC WMI SmartFan wakeups
 _write_legion() {
-    sudo -n /usr/local/bin/omalegion-write write "$1" "$2" > /dev/null 2>&1 || true
+    local node="$1"
+    local val="$2"
+    if [ -f "$node" ]; then
+        local cur
+        cur=$(cat "$node" 2>/dev/null || true)
+        if [ "$cur" = "$val" ]; then
+            return 0
+        fi
+    fi
+    sudo -n /usr/local/bin/omalegion-write write "$node" "$val" > /dev/null 2>&1 || true
 }
 
 _apply_cpu() {
     local profile="$1"
     if command -v powerprofilesctl >/dev/null 2>&1; then
-        powerprofilesctl set "$profile" >/dev/null 2>&1 || true
+        local cur_prof
+        cur_prof=$(powerprofilesctl get 2>/dev/null || true)
+        if [ "$cur_prof" != "$profile" ]; then
+            powerprofilesctl set "$profile" >/dev/null 2>&1 || true
+        fi
     fi
     if command -v ryoku-power >/dev/null 2>&1; then
         sudo -n /usr/local/bin/ryoku-power apply-profile "$profile" > /dev/null 2>&1 || true
@@ -24,6 +39,17 @@ _apply_cpu() {
 }
 
 WIFI_IFACE=$(iw dev 2>/dev/null | awk '$1=="Interface"{print $2; exit}')
+
+_set_wifi_powersave() {
+    local state="$1"
+    if [ -n "$WIFI_IFACE" ]; then
+        local cur_state
+        cur_state=$(iw dev "$WIFI_IFACE" get power_save 2>/dev/null | awk '{print $3}' || true)
+        if [ "$cur_state" != "$state" ]; then
+            iw dev "$WIFI_IFACE" set power_save "$state" 2>/dev/null || true
+        fi
+    fi
+}
 
 if [ "$MODE" = "game" ] || [ "$MODE" = "full" ] || [ "$MODE" = "custom" ]; then
     echo "🎮 Switching to GAMING / MAXIMUM PERFORMANCE MODE"
@@ -35,9 +61,7 @@ if [ "$MODE" = "game" ] || [ "$MODE" = "full" ] || [ "$MODE" = "custom" ]; then
     _write_legion "$IGPU_MAX_FREQ_NODE" "1450"
     
     # 3. Disable WiFi power saving for minimum online latency
-    if [ -n "$WIFI_IFACE" ]; then
-        iw dev "$WIFI_IFACE" set power_save off 2>/dev/null || true
-    fi
+    _set_wifi_powersave "off"
 
     # 4. PCIe performance (WiFi, Ethernet on)
     _write_legion "/sys/bus/pci/devices/0000:00:14.3/power/control" "on"
@@ -71,9 +95,7 @@ if [ "$AC_ONLINE" = "1" ] || [ "$MODE" = "ac" ] || [ "$MODE" = "balance" ]; then
     _write_legion "$PROFILE_NODE" "balanced"
     
     # 5. Disable WiFi power saving for responsive browsing/streaming
-    if [ -n "$WIFI_IFACE" ]; then
-        iw dev "$WIFI_IFACE" set power_save off 2>/dev/null || true
-    fi
+    _set_wifi_powersave "off"
 
     # 6. Restore PCIe performance on AC (WiFi)
     _write_legion "/sys/bus/pci/devices/0000:00:14.3/power/control" "on"
@@ -99,9 +121,7 @@ else
     _write_legion "$PROFILE_NODE" "low-power"
     
     # 5. Enable WiFi power saving
-    if [ -n "$WIFI_IFACE" ]; then
-        iw dev "$WIFI_IFACE" set power_save on 2>/dev/null || true
-    fi
+    _set_wifi_powersave "on"
 
     # 6. Enable runtime PM on non-critical PCIe devices (Ethernet, WiFi)
     _write_legion "/sys/bus/pci/devices/0000:07:00.0/power/control" "auto"
@@ -116,8 +136,7 @@ else
     
     echo "✅ Deep battery power saving active."
     
-    # Show current discharge rate
-    sleep 1
+    # Check current discharge rate
     if [ -f /sys/class/power_supply/BAT0/power_now ]; then
         NOW=$(cat /sys/class/power_supply/BAT0/power_now)
         WATTS=$(awk "BEGIN {printf \"%.2f\", $NOW/1000000}")
