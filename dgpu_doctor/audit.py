@@ -346,22 +346,23 @@ def run_audit() -> AuditReport:
     parent_ctrl_file = parent_bridge / "power" / "control"
     if parent_ctrl_file.exists():
         parent_ctrl = _read_trimmed(parent_ctrl_file)
-        if parent_ctrl in ("auto", "on"):
+        if parent_ctrl == "auto":
             report.findings.append(
                 AuditFinding(
                     category="PCIe Root Port",
                     status="PASS",
-                    title=f"Parent PCIe bridge {parent_bridge.name} is set to '{parent_ctrl}'",
-                    details=f"{parent_ctrl_file} allows secondary bus power management while ensuring link retraining stability.",
+                    title=f"Parent PCIe bridge {parent_bridge.name} is set to 'auto'",
+                    details=f"{parent_ctrl_file} allows upstream link power gating into L2/L3 so the dGPU can enter D3cold (0.0 W).",
                 )
             )
         else:
             report.findings.append(
                 AuditFinding(
                     category="PCIe Root Port",
-                    status="PASS",
-                    title=f"Parent PCIe bridge {parent_bridge.name} is '{parent_ctrl}'",
-                    details=f"{parent_ctrl_file} root port power control.",
+                    status="FAIL",
+                    title=f"Parent PCIe bridge {parent_bridge.name} is '{parent_ctrl}' (inhibiting D3cold)",
+                    details=f"{parent_ctrl_file} must be 'auto'. When set to 'on', the upstream PCIe root port is forced to D0 active, keeping the bus link energized and trapping the NVIDIA dGPU in D3hot (~14 W phantom draw).",
+                    remediation="Run `dgpu-doctor fix` to set parent bridge to 'auto'.",
                 )
             )
 

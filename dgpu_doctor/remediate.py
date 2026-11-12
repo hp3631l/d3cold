@@ -270,21 +270,27 @@ def _write_sysfs(path: Path | str, value: str) -> bool:
 
 
 def apply_live_power_control() -> Tuple[bool, str]:
-    """Ensure dGPU power/control is 'auto' without waking up the card."""
+    """Ensure dGPU power/control and its parent bridge are 'auto' without waking up the card."""
     dgpu = find_nvidia_dgpu()
     if not dgpu:
         return False, "No NVIDIA dGPU found."
 
     control_file = Path(f"/sys/bus/pci/devices/{dgpu.pci_address}/power/control")
     try:
-        if control_file.exists() and control_file.read_text().strip() == "auto":
-            return True, f"{control_file} is already set to 'auto'."
+        if control_file.exists() and control_file.read_text().strip() != "auto":
+            _write_sysfs(control_file, "auto")
     except OSError:
         pass
 
-    if _write_sysfs(control_file, "auto"):
-        return True, f"Set {control_file} to 'auto'."
-    return False, f"Failed to set {control_file} to 'auto'."
+    parent_bridge_addr = dgpu.sysfs_path.resolve().parent.name
+    parent_ctrl = Path(f"/sys/bus/pci/devices/{parent_bridge_addr}/power/control")
+    try:
+        if parent_ctrl.exists() and parent_ctrl.read_text().strip() != "auto":
+            _write_sysfs(parent_ctrl, "auto")
+    except OSError:
+        pass
+
+    return True, f"Set dGPU and parent bridge {parent_bridge_addr} to 'auto'."
 
 
 def suspend_dgpu(force: bool = False) -> Tuple[bool, str, List[str]]:
@@ -295,8 +301,8 @@ def suspend_dgpu(force: bool = False) -> Tuple[bool, str, List[str]]:
     3. Disables driver persistence mode via nvidia-smi -pm 0.
     4. Detects and terminates rogue processes holding /dev/nvidia* if force is True.
     5. Removes or unbinds NVIDIA audio controller (0000:xx:00.1).
-    6. Ensures power/control is 'auto' for dGPU while keeping parent PCIe bridge stable.
-    7. Polls runtime_status until suspended or timeout.
+    6. Ensures power/control is 'auto' for both dGPU and parent PCIe root port.
+    7. Polls runtime_status until suspended in D3cold or timeout.
     """
     from .pci import find_nvidia_audio, get_nvidia_client_processes, _read_trimmed
 
@@ -305,10 +311,10 @@ def suspend_dgpu(force: bool = False) -> Tuple[bool, str, List[str]]:
     if not dgpu:
         return False, "No NVIDIA dGPU found on PCI bus.", logs
 
-    # Check if ALREADY suspended in D3cold
+    # Check if ALREADY suspended in D3cold (do NOT exit early if stuck in D3hot!)
     cur_status = _read_trimmed(dgpu.sysfs_path / "power" / "runtime_status")
     cur_state = _read_trimmed(dgpu.sysfs_path / "power_state")
-    if cur_status == "suspended" or cur_state == "D3cold":
+    if cur_status == "suspended" and cur_state == "D3cold":
         logs.append(f"dGPU is already in {cur_state} ({cur_status}).")
         return True, f"dGPU is in deep sleep {cur_state} (0.0 W).", logs
 
@@ -374,11 +380,19 @@ def suspend_dgpu(force: bool = False) -> Tuple[bool, str, List[str]]:
         except Exception:
             _write_sysfs(ctrl_file, "auto")
 
-    # Keep parent bridge at 'on' to preserve PCIe link retraining stability on cold resume
+    # Enforce parent bridge to 'auto' so the upstream PCIe root port powers down to L2/L3 (enabling D3cold)
     parent_bridge_addr = dgpu.sysfs_path.resolve().parent.name
     parent_ctrl = Path(f"/sys/bus/pci/devices/{parent_bridge_addr}/power/control")
     if parent_ctrl.exists():
-        logs.append(f"Parent bridge {parent_bridge_addr} left at '{parent_ctrl.read_text().strip()}' for link stability.")
+        try:
+            if parent_ctrl.read_text().strip() == "auto":
+                logs.append(f"Parent bridge {parent_bridge_addr} already 'auto'.")
+            elif _write_sysfs(parent_ctrl, "auto"):
+                logs.append(f"Set parent bridge {parent_bridge_addr} -> auto (enabling D3cold).")
+            else:
+                logs.append(f"Warning: Failed to set parent bridge {parent_bridge_addr} -> auto.")
+        except Exception:
+            _write_sysfs(parent_ctrl, "auto")
 
     # 6. Active verification polling loop (up to 7s to cover 5s autosuspend delay)
     import time
@@ -386,8 +400,8 @@ def suspend_dgpu(force: bool = False) -> Tuple[bool, str, List[str]]:
         time.sleep(0.25)
         status = _read_trimmed(dgpu.sysfs_path / "power" / "runtime_status")
         state = _read_trimmed(dgpu.sysfs_path / "power_state")
-        if status == "suspended" or state == "D3cold":
-            return True, f"dGPU successfully suspended to D3cold (status={status}, state={state}).", logs
+        if status == "suspended" and state == "D3cold":
+            return True, f"dGPU successfully suspended to D3cold (status={status}, state={state}, 0.0 W).", logs
 
     status = _read_trimmed(dgpu.sysfs_path / "power" / "runtime_status")
     state = _read_trimmed(dgpu.sysfs_path / "power_state")

@@ -56,6 +56,7 @@ def run_monitor(interval: float = 1.0, duration: float | None = None) -> None:
             cpu_str = f" | CPU Pkg: {cpu_w:.1f}W" if cpu_w is not None else ""
 
             # Check for transitions
+            p_state = dgpu.power_state
             if current_status != last_status:
                 if current_status == "active" and last_status == "suspended":
                     # WAKE EVENT DETECTED!
@@ -74,12 +75,15 @@ def run_monitor(interval: float = 1.0, duration: float | None = None) -> None:
                     if wake_start:
                         elapsed = time.time() - wake_start
                         elapsed_str = f" (after {elapsed:.1f}s active)"
-                    print(f"\n[{now_str}] 💤 SLEEP: returned to D3cold suspended{elapsed_str}\n")
+                    print(f"\n[{now_str}] 💤 SLEEP: returned to {p_state} ({current_status}){elapsed_str}\n")
                 last_status = current_status
 
             # Format status badge
             if current_status == "suspended":
-                status_badge = "\033[92m● SUSPENDED (0.0W)\033[0m"
+                if p_state == "D3cold":
+                    status_badge = "\033[92m● D3cold (0.0W)\033[0m"
+                else:
+                    status_badge = f"\033[93m● {p_state} (~14W)\033[0m"
             elif current_status == "suspending":
                 status_badge = "\033[93m◐ SUSPENDING...\033[0m"
             elif current_status == "resuming":

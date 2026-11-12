@@ -152,15 +152,22 @@ def cmd_status(_args: argparse.Namespace) -> int:
 
 
 def cmd_daemon(_args: argparse.Namespace) -> int:
-    """Lightweight user daemon that enforces power/control = auto."""
+    """Lightweight user daemon that enforces power/control = auto on dGPU and parent PCIe bridge."""
     dgpu = find_nvidia_dgpu()
     if not dgpu:
         return 1
 
     ctrl_file = dgpu.sysfs_path / "power" / "control"
+    parent_bridge = dgpu.sysfs_path.resolve().parent
+    parent_ctrl = parent_bridge / "power" / "control"
     while True:
         try:
+            needs_fix = False
             if ctrl_file.exists() and ctrl_file.read_text().strip() != "auto":
+                needs_fix = True
+            if parent_ctrl.exists() and parent_ctrl.read_text().strip() != "auto":
+                needs_fix = True
+            if needs_fix:
                 apply_live_power_control()
         except OSError:
             pass
