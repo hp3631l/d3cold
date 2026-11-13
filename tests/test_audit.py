@@ -67,6 +67,27 @@ class TestDGPUAudit(unittest.TestCase):
         fail_audio = next((f for f in report.findings if f.category == "Audio Controller" and f.status == "FAIL"), None)
         self.assertIsNotNone(fail_audio)
 
+    @patch("dgpu_doctor.audit.find_nvidia_dgpu")
+    @patch("dgpu_doctor.audit.find_nvidia_audio")
+    @patch("dgpu_doctor.audit.get_nvidia_client_processes")
+    @patch.dict("os.environ", {"VK_DRIVER_FILES": "/usr/share/vulkan/icd.d/intel_icd.json"})
+    def test_global_vk_driver_lock_fails(self, mock_clients, mock_audio, mock_dgpu):
+        mock_gpu = MagicMock(spec=GPUDevice)
+        mock_gpu.name = "NVIDIA GeForce RTX 4050 Laptop GPU"
+        mock_gpu.pci_address = "0000:01:00.0"
+        mock_gpu.runtime_status = "suspended"
+        mock_gpu.power_control = "auto"
+        mock_gpu.sysfs_path = Path("/sys/bus/pci/devices/0000:01:00.0")
+
+        mock_dgpu.return_value = mock_gpu
+        mock_audio.return_value = None
+        mock_clients.return_value = []
+
+        report = run_audit()
+        gaming_finding = next((f for f in report.findings if f.category == "Gaming Environment"), None)
+        self.assertIsNotNone(gaming_finding)
+        self.assertEqual(gaming_finding.status, "FAIL")
+
 
 if __name__ == "__main__":
     unittest.main()

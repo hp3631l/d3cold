@@ -228,35 +228,68 @@ def run_audit() -> AuditReport:
             )
         )
 
-    # Layer 4: Compositor EGL Library Leak
-    egl_env = os.environ.get("__EGL_VENDOR_LIBRARY_FILENAMES", "")
+    # Layer 4: Compositor Primary GPU & Gaming Environment Isolation
+    from .pci import find_igpu_drm_card
+    igpu_card = find_igpu_drm_card()
+    aq_drm = os.environ.get("AQ_DRM_DEVICES", "")
     hypr_env_file = Path.home() / ".config/environment.d/10-hyprland-gpu.conf"
     uwsm_env_file = Path.home() / ".config/uwsm/env-hyprland"
-    mesa_json = "/usr/share/glvnd/egl_vendor.d/50_mesa.json"
+    uwsm_base_env = Path.home() / ".config/uwsm/env"
 
-    is_egl_pinned = "50_mesa.json" in egl_env
-    if not is_egl_pinned and hypr_env_file.exists():
-        is_egl_pinned = "50_mesa.json" in hypr_env_file.read_text()
-    if not is_egl_pinned and uwsm_env_file.exists():
-        is_egl_pinned = "50_mesa.json" in uwsm_env_file.read_text()
+    has_aq = bool(igpu_card and igpu_card in aq_drm)
+    if not has_aq and hypr_env_file.exists():
+        has_aq = bool(igpu_card and igpu_card in hypr_env_file.read_text())
+    if not has_aq and uwsm_env_file.exists():
+        has_aq = bool(igpu_card and igpu_card in uwsm_env_file.read_text())
 
-    if is_egl_pinned:
+    if has_aq:
         report.findings.append(
             AuditFinding(
-                category="Compositor EGL",
+                category="Compositor GPU",
                 status="PASS",
-                title="Compositor EGL vendor pinned to Mesa",
-                details="__EGL_VENDOR_LIBRARY_FILENAMES is restricted to 50_mesa.json, preventing 10_nvidia.json file descriptor leaks.",
+                title="Compositor display engine pinned to iGPU",
+                details=f"AQ_DRM_DEVICES configures the primary render node to {igpu_card}, keeping dGPU available for sleep.",
             )
         )
     else:
         report.findings.append(
             AuditFinding(
-                category="Compositor EGL",
+                category="Compositor GPU",
                 status="WARN",
-                title="__EGL_VENDOR_LIBRARY_FILENAMES is unpinned",
-                details="libglvnd will probe 10_nvidia.json on compositor start, leaving open file descriptors to /dev/nvidia0.",
-                remediation="Run `d3cold fix` to isolate compositor EGL to Mesa.",
+                title="Compositor display engine not pinned to iGPU",
+                details="AQ_DRM_DEVICES is not explicitly configuring iGPU as primary render device.",
+                remediation="Run `d3cold fix` to pin compositor display engine to iGPU.",
+            )
+        )
+
+    # Check for harmful global environment driver locks (VK_DRIVER_FILES, __EGL_VENDOR_LIBRARY_FILENAMES)
+    has_global_vk_lock = bool(os.environ.get("VK_DRIVER_FILES"))
+    has_global_egl_lock = bool(os.environ.get("__EGL_VENDOR_LIBRARY_FILENAMES"))
+    for f in (hypr_env_file, uwsm_env_file, uwsm_base_env):
+        if f.exists():
+            txt = f.read_text()
+            if "VK_DRIVER_FILES" in txt:
+                has_global_vk_lock = True
+            if "__EGL_VENDOR_LIBRARY_FILENAMES" in txt:
+                has_global_egl_lock = True
+
+    if has_global_vk_lock or has_global_egl_lock:
+        report.findings.append(
+            AuditFinding(
+                category="Gaming Environment",
+                status="FAIL",
+                title="Session environment contains global driver locks",
+                details="Global VK_DRIVER_FILES or __EGL_VENDOR_LIBRARY_FILENAMES is set in session configs, which starves games and Proton from discovering NVIDIA Vulkan/EGL.",
+                remediation="Run `d3cold fix` to purge harmful global driver locks and restore game offloading.",
+            )
+        )
+    else:
+        report.findings.append(
+            AuditFinding(
+                category="Gaming Environment",
+                status="PASS",
+                title="Gaming and Vulkan ICD discovery is clean",
+                details="No global session locks detected. Games and Proton can discover and offload to NVIDIA dGPU seamlessly.",
             )
         )
 

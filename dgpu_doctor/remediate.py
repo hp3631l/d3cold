@@ -50,7 +50,13 @@ export __VK_LAYER_NV_optimus=NVIDIA_only
 export __GLX_VENDOR_LIBRARY_NAME=nvidia
 export DRI_PRIME=1
 
-# Bind Vulkan exclusively to NVIDIA ICD if present
+# Clear any conflicting Mesa/Intel driver locks that might have been inherited
+unset __EGL_VENDOR_LIBRARY_FILENAMES
+unset LIBVA_DRIVER_NAME
+unset VK_DRIVER_FILES
+unset VK_ICD_FILENAMES
+
+# Explicitly export NVIDIA ICD if present
 for icd in /usr/share/vulkan/icd.d/nvidia_icd.json /etc/vulkan/icd.d/nvidia_icd.json; do
     if [ -f "$icd" ]; then
         export VK_DRIVER_FILES="$icd"
@@ -58,9 +64,6 @@ for icd in /usr/share/vulkan/icd.d/nvidia_icd.json /etc/vulkan/icd.d/nvidia_icd.
         break
     fi
 done
-
-unset __EGL_VENDOR_LIBRARY_FILENAMES
-unset LIBVA_DRIVER_NAME
 
 exec "$@"
 """
@@ -94,7 +97,7 @@ def fix_btop() -> Tuple[bool, str]:
 
 
 def fix_compositor_env() -> List[Tuple[bool, str]]:
-    """Configure environment files so Wayland compositors don't leak NVIDIA EGL fds."""
+    """Configure environment files so Wayland compositors prioritize iGPU without breaking gaming."""
     from .pci import find_igpu_drm_card, find_dgpu_drm_card
 
     results = []
@@ -110,36 +113,67 @@ def fix_compositor_env() -> List[Tuple[bool, str]]:
     env_file = env_dir / "10-hyprland-gpu.conf"
     try:
         env_dir.mkdir(parents=True, exist_ok=True)
-        content = (
-            f"{intel_val}\n"
-            "__EGL_VENDOR_LIBRARY_FILENAMES=/usr/share/glvnd/egl_vendor.d/50_mesa.json\n"
-            "VK_DRIVER_FILES=/usr/share/vulkan/icd.d/intel_icd.x86_64.json\n"
-            "LIBVA_DRIVER_NAME=iHD\n"
-        )
+        # NEVER export VK_DRIVER_FILES or __EGL_VENDOR_LIBRARY_FILENAMES globally!
+        # Doing so locks the entire session to Intel/Mesa and prevents games and Proton
+        # from accessing NVIDIA Vulkan/EGL.
+        content = f"{intel_val}\n"
         env_file.write_text(content)
-        results.append((True, f"Updated {env_file}"))
+        results.append((True, f"Updated {env_file} (AQ_DRM_DEVICES pinned to iGPU)"))
     except Exception as e:
         results.append((False, f"Failed to write {env_file}: {e}"))
 
-    # 2. ~/.config/uwsm/env-hyprland
-    uwsm_dir = Path.home() / ".config/uwsm"
-    uwsm_file = uwsm_dir / "env-hyprland"
+    # 2. Clean ~/.config/uwsm/env-hyprland & ~/.config/uwsm/env
+    for uwsm_name in ("env-hyprland", "env"):
+        uwsm_file = Path.home() / f".config/uwsm/{uwsm_name}"
+        if not uwsm_file.parent.exists():
+            continue
+        try:
+            lines = []
+            if uwsm_file.exists():
+                prefixes = (
+                    "export AQ_DRM_DEVICES",
+                    "export __EGL_VENDOR_LIBRARY_FILENAMES",
+                    "export VK_DRIVER_FILES",
+                    "export LIBVA_DRIVER_NAME",
+                )
+                lines = [l for l in uwsm_file.read_text().splitlines() if not any(l.startswith(p) for p in prefixes)]
+            lines.append(f"export {intel_val}")
+            uwsm_file.write_text("\n".join(lines) + "\n")
+            results.append((True, f"Updated {uwsm_file} (purged global driver locks)"))
+        except Exception as e:
+            results.append((False, f"Failed to write {uwsm_file}: {e}"))
+
+    # 3. Clean ~/.config/hypr/hyprland.lua if it contains erroneous driver locks
+    hypr_lua = Path.home() / ".config/hypr/hyprland.lua"
+    if hypr_lua.exists():
+        try:
+            lua_text = hypr_lua.read_text()
+            modified = re.sub(r'hl\.env\("__EGL_VENDOR_LIBRARY_FILENAMES",\s*"[^"]*"\)\n?', '', lua_text)
+            modified = re.sub(r'hl\.env\("VK_DRIVER_FILES",\s*"[^"]*"\)\n?', '', modified)
+            modified = re.sub(r'hl\.env\("LIBVA_DRIVER_NAME",\s*"[^"]*"\)\n?', '', modified)
+            if modified != lua_text:
+                hypr_lua.write_text(modified)
+                results.append((True, "Purged global driver locks from ~/.config/hypr/hyprland.lua"))
+                subprocess.run(["hyprctl", "reload"], check=False, capture_output=True)
+        except Exception as e:
+            results.append((False, f"Failed to clean hyprland.lua: {e}"))
+
+    # 4. Clean active systemd user session environment
     try:
-        uwsm_dir.mkdir(parents=True, exist_ok=True)
-        lines = []
-        if uwsm_file.exists():
-            prefixes = ("export AQ_DRM_DEVICES", "export __EGL_VENDOR_LIBRARY_FILENAMES", "export VK_DRIVER_FILES", "export LIBVA_DRIVER_NAME")
-            lines = [l for l in uwsm_file.read_text().splitlines() if not any(l.startswith(p) for p in prefixes)]
-        lines.extend([
-            f"export {intel_val}",
-            "export __EGL_VENDOR_LIBRARY_FILENAMES=/usr/share/glvnd/egl_vendor.d/50_mesa.json",
-            "export VK_DRIVER_FILES=/usr/share/vulkan/icd.d/intel_icd.x86_64.json",
-            "export LIBVA_DRIVER_NAME=iHD",
-        ])
-        uwsm_file.write_text("\n".join(lines) + "\n")
-        results.append((True, f"Updated {uwsm_file}"))
+        subprocess.run(
+            ["systemctl", "--user", "unset-environment", "VK_DRIVER_FILES", "__EGL_VENDOR_LIBRARY_FILENAMES", "LIBVA_DRIVER_NAME"],
+            check=False,
+            capture_output=True,
+        )
+        subprocess.run(["systemctl", "--user", "daemon-reload"], check=False, capture_output=True)
+        subprocess.run(
+            ["systemctl", "--user", "unset-environment", "VK_DRIVER_FILES", "__EGL_VENDOR_LIBRARY_FILENAMES", "LIBVA_DRIVER_NAME"],
+            check=False,
+            capture_output=True,
+        )
+        results.append((True, "Cleared session environment locks in systemd --user"))
     except Exception as e:
-        results.append((False, f"Failed to write {uwsm_file}: {e}"))
+        results.append((False, f"Failed to unset systemd environment: {e}"))
 
     return results
 

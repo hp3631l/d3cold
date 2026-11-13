@@ -73,7 +73,8 @@ Before installing `dgpu-doctor`, ensure your system meets the following hardware
   - Detects rogue polling configurations in `btop.conf` and status bar scripts.
   - Reads live battery charge vs. discharge status without mislabeling AC charging current.
 - **🛠️ Automated 1-Click Remediation (`d3cold fix`)**:
-  - Automatically pins compositor environment variables (`__EGL_VENDOR_LIBRARY_FILENAMES=50_mesa.json`).
+  - Automatically pins compositor display engine (`AQ_DRM_DEVICES`) to iGPU primary without polluting global session environments.
+  - Purges harmful session environment locks (`VK_DRIVER_FILES`, `__EGL_VENDOR_LIBRARY_FILENAMES`) that break gaming and Proton.
   - Optimizes `btop.conf` to monitor iGPU only without NVML PCIe polling.
   - Generates and deploys persistent udev rules and modprobe RTD3 configuration.
   - Installs the high-performance on-demand gaming wrapper `prime-run`.
@@ -134,7 +135,8 @@ Battery Discharge: 17.18 W
 [✓ PASS] Audio Controller: NVIDIA Audio controller is unbound / removed
 [✓ PASS] Udev Rules: NVIDIA Runtime PM udev rule is present
 [✓ PASS] Modprobe: NVIDIA DynamicPowerManagement is configured
-[✓ PASS] Compositor EGL: Compositor EGL vendor pinned to Mesa
+[✓ PASS] Compositor GPU: Compositor display engine pinned to iGPU
+[✓ PASS] Gaming Environment: Gaming and Vulkan ICD discovery is clean
 [✓ PASS] Terminal Monitors: btop configuration is optimized for iGPU only
 [✓ PASS] Active Clients: No active processes holding /dev/nvidia*
 [✓ PASS] Persistence Daemon: nvidia-persistenced is not running

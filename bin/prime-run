@@ -7,7 +7,13 @@ export __VK_LAYER_NV_optimus=NVIDIA_only
 export __GLX_VENDOR_LIBRARY_NAME=nvidia
 export DRI_PRIME=1
 
-# Bind Vulkan exclusively to NVIDIA ICD if present
+# Clear any conflicting Mesa/Intel driver locks that might have been inherited
+unset __EGL_VENDOR_LIBRARY_FILENAMES
+unset LIBVA_DRIVER_NAME
+unset VK_DRIVER_FILES
+unset VK_ICD_FILENAMES
+
+# Explicitly export NVIDIA ICD if present
 for icd in /usr/share/vulkan/icd.d/nvidia_icd.json /etc/vulkan/icd.d/nvidia_icd.json; do
     if [ -f "$icd" ]; then
         export VK_DRIVER_FILES="$icd"
@@ -15,8 +21,5 @@ for icd in /usr/share/vulkan/icd.d/nvidia_icd.json /etc/vulkan/icd.d/nvidia_icd.
         break
     fi
 done
-
-unset __EGL_VENDOR_LIBRARY_FILENAMES
-unset LIBVA_DRIVER_NAME
 
 exec "$@"
