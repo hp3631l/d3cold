@@ -70,6 +70,45 @@ class TestDGPUAudit(unittest.TestCase):
     @patch("dgpu_doctor.audit.find_nvidia_dgpu")
     @patch("dgpu_doctor.audit.find_nvidia_audio")
     @patch("dgpu_doctor.audit.get_nvidia_client_processes")
+    def test_audio_with_runtime_pm_auto_passes(self, mock_clients, mock_audio, mock_dgpu):
+        mock_gpu = MagicMock(spec=GPUDevice)
+        mock_gpu.name = "NVIDIA GeForce RTX 4050 Laptop GPU"
+        mock_gpu.pci_address = "0000:01:00.0"
+        mock_gpu.runtime_status = "suspended"
+        mock_gpu.power_control = "auto"
+        mock_gpu.sysfs_path = Path("/sys/bus/pci/devices/0000:01:00.0")
+
+        mock_dgpu.return_value = mock_gpu
+
+        # Simulate audio device bound to snd_hda_intel with power/control == "auto"
+        mock_audio_path = MagicMock(spec=Path)
+        mock_audio_path.exists.return_value = True
+        mock_audio_path.name = "0000:01:00.1"
+        mock_driver = MagicMock(spec=Path)
+        mock_driver.exists.return_value = True
+        mock_driver.resolve.return_value.name = "snd_hda_intel"
+        mock_ctrl = MagicMock(spec=Path)
+        mock_ctrl.read_text.return_value = "auto\n"
+        mock_ctrl.__truediv__.return_value = mock_ctrl
+
+        def truediv_side_effect(arg):
+            if str(arg) == "driver":
+                return mock_driver
+            return mock_ctrl
+
+        mock_audio_path.__truediv__.side_effect = truediv_side_effect
+
+        mock_audio.return_value = mock_audio_path
+        mock_clients.return_value = []
+
+        report = run_audit()
+        audio_finding = next((f for f in report.findings if f.category == "Audio Controller"), None)
+        self.assertIsNotNone(audio_finding)
+        self.assertEqual(audio_finding.status, "PASS")
+
+    @patch("dgpu_doctor.audit.find_nvidia_dgpu")
+    @patch("dgpu_doctor.audit.find_nvidia_audio")
+    @patch("dgpu_doctor.audit.get_nvidia_client_processes")
     @patch.dict("os.environ", {"VK_DRIVER_FILES": "/usr/share/vulkan/icd.d/intel_icd.json"})
     def test_global_vk_driver_lock_fails(self, mock_clients, mock_audio, mock_dgpu):
         mock_gpu = MagicMock(spec=GPUDevice)

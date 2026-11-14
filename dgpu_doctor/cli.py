@@ -50,16 +50,19 @@ def cmd_fix(args: argparse.Namespace) -> int:
     print(f"\n{B}{C}=== Applying d3cold Remediations ==={E}\n")
     for name, fn in [("PCI Power Control", apply_live_power_control), ("Terminal Monitor", fix_btop), ("Game Offloader", install_prime_run)]:
         ok, msg = fn()
-        print(f"[{G if ok else R}✓{E}] {name}: {msg}")
+        icon = f"{G}✓{E}" if ok else f"{R}✗{E}"
+        print(f"[{icon}] {name}: {msg}")
 
     for ok, msg in fix_compositor_env():
-        print(f"[{G if ok else R}✓{E}] Compositor Config: {msg}")
+        icon = f"{G}✓{E}" if ok else f"{R}✗{E}"
+        print(f"[{icon}] Compositor Config: {msg}")
 
     if are_system_rules_installed():
         print(f"[{G}✓{E}] System Rules: RTD3 udev & modprobe configurations are already active.")
     elif getattr(args, "system", False) or getattr(args, "all", False):
         for ok, msg in fix_system_rules():
-            print(f"[{G if ok else R}✓{E}] System Rules: {msg}")
+            icon = f"{G}✓{E}" if ok else f"{R}✗{E}"
+            print(f"[{icon}] System Rules: {msg}")
     else:
         print(f"\n{C}Note:{E} RTD3 rules not detected. Run `d3cold fix --system` to install.")
 
@@ -67,7 +70,8 @@ def cmd_fix(args: argparse.Namespace) -> int:
     ok, msg, logs = suspend_dgpu(force=getattr(args, "force", False))
     for line in logs:
         print(f"  • {line}")
-    print(f"[{G if ok else Y}✓{E}] Suspension Result: {msg}\n\n{G}{B}Remediation complete.{E} Run `d3cold audit` or `d3cold watch` to verify.\n")
+    icon = f"{G}✓{E}" if ok else f"{Y}⚠{E}"
+    print(f"[{icon}] Suspension Result: {msg}\n\n{G}{B}Remediation complete.{E} Run `d3cold audit` or `d3cold watch` to verify.\n")
     return 0 if ok else 1
 
 

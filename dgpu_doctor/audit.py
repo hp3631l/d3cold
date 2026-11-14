@@ -79,12 +79,17 @@ def run_audit() -> AuditReport:
     audio_dev = find_nvidia_audio()
     if audio_dev and audio_dev.exists():
         driver = audio_dev / "driver"
-        if driver.exists() and driver.resolve().name == "snd_hda_intel":
-            report.add("Audio Controller", "FAIL", f"NVIDIA Audio ({audio_dev.name}) is bound to snd_hda_intel", "WirePlumber/PipeWire audio probing keeps the GPU awake.", "Run `d3cold fix` to deploy udev rules that remove audio function.")
+        if driver.exists():
+            dname = driver.resolve().name
+            actrl = _read_trimmed(audio_dev / "power" / "control")
+            if actrl == "auto":
+                report.add("Audio Controller", "PASS", f"NVIDIA Audio ({audio_dev.name}) runtime PM is enabled (auto)", f"Bound to {dname} with runtime PM active, preserving wired display audio while allowing D3cold.")
+            else:
+                report.add("Audio Controller", "FAIL", f"NVIDIA Audio ({audio_dev.name}) runtime PM is '{actrl or 'disabled'}'", f"Bound to {dname} without auto-suspend, which keeps the dGPU awake.", "Run `d3cold fix` to enable runtime power management for the audio controller.")
         else:
-            report.add("Audio Controller", "PASS", "NVIDIA Audio controller is unbound / removed", "No audio controller on the NVIDIA slot is preventing D3cold.")
+            report.add("Audio Controller", "PASS", "NVIDIA Audio controller is unbound", "Audio driver is not bound to the NVIDIA slot.")
     else:
-        report.add("Audio Controller", "PASS", "NVIDIA Audio controller is unbound / removed", "No audio controller on the NVIDIA slot is preventing D3cold.")
+        report.add("Audio Controller", "PASS", "NVIDIA Audio controller is not present", "No audio controller detected on the NVIDIA slot.")
 
     # Layer 3: Persistence Mode / Daemon
     params_file = Path("/proc/driver/nvidia/params")
