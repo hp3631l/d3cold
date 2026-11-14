@@ -1,7 +1,4 @@
-"""Diagnostics engine for NVIDIA hybrid laptop power drain.
-
-Performs a 5-layer audit to pinpoint why a discrete GPU refuses to enter D3cold.
-"""
+"""Diagnostics engine for NVIDIA hybrid laptop power drain."""
 
 from __future__ import annotations
 
@@ -42,6 +39,9 @@ class AuditReport:
     battery_status: str = "Unknown"
     cpu_package_watts: float | None = None
 
+    def add(self, cat: str, status: str, title: str, details: str, remedy: str = "") -> None:
+        self.findings.append(AuditFinding(cat, status, title, details, remedy))
+
     @property
     def has_failures(self) -> bool:
         return any(f.status == "FAIL" for f in self.findings)
@@ -58,345 +58,103 @@ def run_audit() -> AuditReport:
 
     dgpu = find_nvidia_dgpu()
     if not dgpu:
-        report.findings.append(
-            AuditFinding(
-                category="Hardware",
-                status="WARN",
-                title="No NVIDIA discrete GPU found on PCI bus",
-                details="No PCI device with vendor ID 0x10de and display class was detected.",
-            )
-        )
+        report.add("Hardware", "WARN", "No NVIDIA discrete GPU found on PCI bus", "No PCI device with vendor ID 0x10de and display class detected.")
         return report
 
-    report.dgpu_name = dgpu.name
-    report.dgpu_pci = dgpu.pci_address
-    report.runtime_status = dgpu.runtime_status
-    report.power_control = dgpu.power_control
+    report.dgpu_name, report.dgpu_pci = dgpu.name, dgpu.pci_address
+    report.runtime_status, report.power_control = dgpu.runtime_status, dgpu.power_control
 
-    # Layer 1: PCI Runtime Power Management State
+    # Layer 1: PCI Runtime Power Management
     if dgpu.runtime_status == "suspended":
-        report.findings.append(
-            AuditFinding(
-                category="Runtime PM",
-                status="PASS",
-                title="dGPU is in deep sleep (D3cold)",
-                details=f"Device {dgpu.pci_address} is powered off and suspended by kernel PCI PM.",
-            )
-        )
+        report.add("Runtime PM", "PASS", "dGPU is in deep sleep (D3cold)", f"Device {dgpu.pci_address} is powered off and suspended by kernel PCI PM.")
     else:
-        report.findings.append(
-            AuditFinding(
-                category="Runtime PM",
-                status="FAIL",
-                title=f"dGPU is stuck awake ({dgpu.runtime_status})",
-                details=f"Device {dgpu.pci_address} is powered up in state '{dgpu.runtime_status}'.",
-                remediation="Run `d3cold fix` to apply RTD3 udev rules, compositor environment, and terminate wake loops.",
-            )
-        )
+        report.add("Runtime PM", "FAIL", f"dGPU is stuck awake ({dgpu.runtime_status})", f"Device {dgpu.pci_address} is powered up in state '{dgpu.runtime_status}'.", "Run `d3cold fix` to apply RTD3 rules and compositor environment.")
 
     if dgpu.power_control == "auto":
-        report.findings.append(
-            AuditFinding(
-                category="Runtime PM",
-                status="PASS",
-                title="PCI power/control is set to 'auto'",
-                details=f"{dgpu.sysfs_path}/power/control allows automatic runtime suspension.",
-            )
-        )
+        report.add("Runtime PM", "PASS", "PCI power/control is set to 'auto'", f"{dgpu.sysfs_path}/power/control allows automatic runtime suspension.")
     else:
-        report.findings.append(
-            AuditFinding(
-                category="Runtime PM",
-                status="FAIL",
-                title=f"PCI power/control is '{dgpu.power_control}' (inhibiting sleep)",
-                details="The kernel is forbidden from suspending the PCI slot because control is not 'auto'.",
-                remediation="Set power/control to 'auto' via udev rule or `dgpu-doctor fix`.",
-            )
-        )
+        report.add("Runtime PM", "FAIL", f"PCI power/control is '{dgpu.power_control}' (blocks sleep)", f"{dgpu.sysfs_path}/power/control must be 'auto'.", "Run `d3cold fix` to set runtime power management to auto.")
 
-    # Layer 2: NVIDIA Multifunction Audio Device (0000:xx:00.1)
+    # Layer 2: NVIDIA Audio Controller
     audio_dev = find_nvidia_audio()
     if audio_dev and audio_dev.exists():
-        # Check if driver is bound
-        driver_link = audio_dev / "driver"
-        if driver_link.exists():
-            report.findings.append(
-                AuditFinding(
-                    category="Audio Controller",
-                    status="FAIL",
-                    title="NVIDIA Audio controller is active and holding dGPU awake",
-                    details=f"Audio function {audio_dev.name} is bound to {driver_link.resolve().name}. WirePlumber/PipeWire may hold /dev/snd/controlC* open.",
-                    remediation="Add an unbind udev rule or run `dgpu-doctor fix` to remove the audio device on boot.",
-                )
-            )
+        driver = audio_dev / "driver"
+        if driver.exists() and driver.resolve().name == "snd_hda_intel":
+            report.add("Audio Controller", "FAIL", f"NVIDIA Audio ({audio_dev.name}) is bound to snd_hda_intel", "WirePlumber/PipeWire audio probing keeps the GPU awake.", "Run `d3cold fix` to deploy udev rules that remove audio function.")
         else:
-            report.findings.append(
-                AuditFinding(
-                    category="Audio Controller",
-                    status="WARN",
-                    title="NVIDIA Audio controller exists but has no driver bound",
-                    details=f"Device {audio_dev.name} is present on the bus.",
-                )
-            )
+            report.add("Audio Controller", "PASS", "NVIDIA Audio controller is unbound / removed", "No audio controller on the NVIDIA slot is preventing D3cold.")
     else:
-        report.findings.append(
-            AuditFinding(
-                category="Audio Controller",
-                status="PASS",
-                title="NVIDIA Audio controller is unbound / removed",
-                details="No audio controller on the NVIDIA slot is preventing D3cold transition.",
-            )
-        )
+        report.add("Audio Controller", "PASS", "NVIDIA Audio controller is unbound / removed", "No audio controller on the NVIDIA slot is preventing D3cold.")
 
-    # Layer 2b: NVIDIA Persistence Daemon & Driver Persistence
-    import subprocess
-    try:
-        check = subprocess.run(["systemctl", "is-active", "nvidia-persistenced"], capture_output=True, text=True, timeout=1.5)
-        if check.stdout.strip() == "active":
-            report.findings.append(
-                AuditFinding(
-                    category="Persistence Mode",
-                    status="FAIL",
-                    title="nvidia-persistenced is active (locks GPU awake in D0)",
-                    details="nvidia-persistenced maintains persistent driver state, preventing RTD3 D3cold suspension.",
-                    remediation="Run `sudo systemctl disable --now nvidia-persistenced` or `dgpu-doctor suspend`.",
-                )
-            )
-        else:
-            report.findings.append(
-                AuditFinding(
-                    category="Persistence Mode",
-                    status="PASS",
-                    title="nvidia-persistenced is inactive",
-                    details="Persistence daemon is not keeping driver initialized.",
-                )
-            )
-    except Exception:
-        pass
-
-    # Layer 3: Kernel Module Parameters and Udev Rules
-    udev_pm_file = Path("/etc/udev/rules.d/80-nvidia-pm.rules")
-    if udev_pm_file.exists() and "0x030000" in udev_pm_file.read_text():
-        report.findings.append(
-            AuditFinding(
-                category="Udev Rules",
-                status="PASS",
-                title="NVIDIA Runtime PM udev rule is present",
-                details=f"{udev_pm_file} is configured to manage power/control on bind/unbind.",
-            )
-        )
+    # Layer 3: Persistence Mode / Daemon
+    params_file = Path("/proc/driver/nvidia/params")
+    p_mode = bool(re.search(r"PersistenceMode:\s*1", params_file.read_text())) if params_file.exists() else False
+    if p_mode:
+        report.add("Persistence Mode", "FAIL", "NVIDIA driver persistence mode is ON", "GPU driver maintains persistent state in VRAM.", "Run `nvidia-smi -pm 0` or `d3cold fix` to disable persistence mode.")
     else:
-        report.findings.append(
-            AuditFinding(
-                category="Udev Rules",
-                status="FAIL",
-                title="Missing /etc/udev/rules.d/80-nvidia-pm.rules",
-                details="Kernel udev rules are not set to automate NVIDIA runtime PM upon driver bind.",
-                remediation="Run `sudo dgpu-doctor fix` to deploy the ArchWiki recommended 80-nvidia-pm.rules.",
-            )
-        )
+        report.add("Persistence Mode", "PASS", "nvidia-persistenced is inactive", "Persistence daemon is not keeping driver initialized.")
 
-    # Check modprobe parameter
-    modprobe_files = list(Path("/etc/modprobe.d").glob("*.conf")) if Path("/etc/modprobe.d").exists() else []
-    has_dpm = False
-    for mf in modprobe_files:
-        try:
-            content = mf.read_text()
-            if "NVreg_DynamicPowerManagement=0x0" in content:
-                has_dpm = True
-                break
-        except OSError:
-            pass
-
-    if has_dpm:
-        report.findings.append(
-            AuditFinding(
-                category="Modprobe",
-                status="PASS",
-                title="NVIDIA DynamicPowerManagement is configured",
-                details="Kernel module options in /etc/modprobe.d specify RTD3 dynamic power management.",
-            )
-        )
+    # Layer 3b: Udev Rules
+    has_udev = any(Path(p).exists() and "0x10de" in Path(p).read_text() for p in ("/etc/udev/rules.d/80-nvidia-pm.rules", "/etc/udev/rules.d/99-nvidia-pm.rules", "/lib/udev/rules.d/80-nvidia-pm.rules"))
+    if has_udev:
+        report.add("Udev Rules", "PASS", "NVIDIA Runtime PM udev rule is present", "Udev rule is configured to manage power/control on bind/unbind.")
     else:
-        report.findings.append(
-            AuditFinding(
-                category="Modprobe",
-                status="WARN",
-                title="NVreg_DynamicPowerManagement not explicitly set in /etc/modprobe.d",
-                details="The driver may rely on defaults which are unreliable on certain OEM BIOS implementations.",
-                remediation="Set `options nvidia NVreg_DynamicPowerManagement=0x02` in /etc/modprobe.d/nvidia.conf.",
-            )
-        )
+        report.add("Udev Rules", "WARN", "NVIDIA Runtime PM udev rule missing", "No udev rule found to automatically set power/control to auto.", "Run `d3cold fix --system` to install /etc/udev/rules.d/80-nvidia-pm.rules.")
+
+    # Layer 3c: Modprobe Configuration
+    has_modprobe = any(Path(p).exists() and "NVreg_DynamicPowerManagement=0x02" in Path(p).read_text() for p in ("/etc/modprobe.d/nvidia-pm.conf", "/etc/modprobe.d/nvidia.conf"))
+    if has_modprobe:
+        report.add("Modprobe", "PASS", "NVIDIA DynamicPowerManagement is configured", "Kernel module options specify RTD3 dynamic power management.")
+    else:
+        report.add("Modprobe", "WARN", "NVreg_DynamicPowerManagement=0x02 missing", "Kernel module is not explicitly configured for dynamic power management.", "Run `d3cold fix --system` to configure /etc/modprobe.d/nvidia-pm.conf.")
 
     # Layer 4: Compositor Primary GPU & Gaming Environment Isolation
     from .pci import find_igpu_drm_card
     igpu_card = find_igpu_drm_card()
     aq_drm = os.environ.get("AQ_DRM_DEVICES", "")
-    hypr_env_file = Path.home() / ".config/environment.d/10-hyprland-gpu.conf"
-    uwsm_env_file = Path.home() / ".config/uwsm/env-hyprland"
-    uwsm_base_env = Path.home() / ".config/uwsm/env"
+    h_conf, u_conf, u_base = Path.home() / ".config/environment.d/10-hyprland-gpu.conf", Path.home() / ".config/uwsm/env-hyprland", Path.home() / ".config/uwsm/env"
 
-    has_aq = bool(igpu_card and igpu_card in aq_drm)
-    if not has_aq and hypr_env_file.exists():
-        has_aq = bool(igpu_card and igpu_card in hypr_env_file.read_text())
-    if not has_aq and uwsm_env_file.exists():
-        has_aq = bool(igpu_card and igpu_card in uwsm_env_file.read_text())
-
+    has_aq = bool(igpu_card and (igpu_card in aq_drm or (h_conf.exists() and igpu_card in h_conf.read_text()) or (u_conf.exists() and igpu_card in u_conf.read_text())))
     if has_aq:
-        report.findings.append(
-            AuditFinding(
-                category="Compositor GPU",
-                status="PASS",
-                title="Compositor display engine pinned to iGPU",
-                details=f"AQ_DRM_DEVICES configures the primary render node to {igpu_card}, keeping dGPU available for sleep.",
-            )
-        )
+        report.add("Compositor GPU", "PASS", "Compositor display engine pinned to iGPU", f"AQ_DRM_DEVICES pins primary render node to {igpu_card}.")
     else:
-        report.findings.append(
-            AuditFinding(
-                category="Compositor GPU",
-                status="WARN",
-                title="Compositor display engine not pinned to iGPU",
-                details="AQ_DRM_DEVICES is not explicitly configuring iGPU as primary render device.",
-                remediation="Run `d3cold fix` to pin compositor display engine to iGPU.",
-            )
-        )
+        report.add("Compositor GPU", "WARN", "Compositor display engine not pinned to iGPU", "AQ_DRM_DEVICES not explicitly configuring iGPU as primary.", "Run `d3cold fix` to pin compositor display engine to iGPU.")
 
-    # Check for harmful global environment driver locks (VK_DRIVER_FILES, __EGL_VENDOR_LIBRARY_FILENAMES)
-    has_global_vk_lock = bool(os.environ.get("VK_DRIVER_FILES"))
-    has_global_egl_lock = bool(os.environ.get("__EGL_VENDOR_LIBRARY_FILENAMES"))
-    for f in (hypr_env_file, uwsm_env_file, uwsm_base_env):
-        if f.exists():
-            txt = f.read_text()
-            if "VK_DRIVER_FILES" in txt:
-                has_global_vk_lock = True
-            if "__EGL_VENDOR_LIBRARY_FILENAMES" in txt:
-                has_global_egl_lock = True
-
-    if has_global_vk_lock or has_global_egl_lock:
-        report.findings.append(
-            AuditFinding(
-                category="Gaming Environment",
-                status="FAIL",
-                title="Session environment contains global driver locks",
-                details="Global VK_DRIVER_FILES or __EGL_VENDOR_LIBRARY_FILENAMES is set in session configs, which starves games and Proton from discovering NVIDIA Vulkan/EGL.",
-                remediation="Run `d3cold fix` to purge harmful global driver locks and restore game offloading.",
-            )
-        )
+    has_vk = bool(os.environ.get("VK_DRIVER_FILES")) or any(f.exists() and "VK_DRIVER_FILES" in f.read_text() for f in (h_conf, u_conf, u_base))
+    has_egl = bool(os.environ.get("__EGL_VENDOR_LIBRARY_FILENAMES")) or any(f.exists() and "__EGL_VENDOR_LIBRARY_FILENAMES" in f.read_text() for f in (h_conf, u_conf, u_base))
+    if has_vk or has_egl:
+        report.add("Gaming Environment", "FAIL", "Session environment contains global driver locks", "Global VK_DRIVER_FILES or __EGL_VENDOR_LIBRARY_FILENAMES starves games from discovering NVIDIA Vulkan/EGL.", "Run `d3cold fix` to purge global driver locks.")
     else:
-        report.findings.append(
-            AuditFinding(
-                category="Gaming Environment",
-                status="PASS",
-                title="Gaming and Vulkan ICD discovery is clean",
-                details="No global session locks detected. Games and Proton can discover and offload to NVIDIA dGPU seamlessly.",
-            )
-        )
+        report.add("Gaming Environment", "PASS", "Gaming and Vulkan ICD discovery is clean", "No global session locks detected. Games can offload to NVIDIA seamlessly.")
 
     # Layer 5: Terminal Monitors (btop)
     btop_conf = Path.home() / ".config/btop/btop.conf"
     if btop_conf.exists():
-        btop_text = btop_conf.read_text()
-        has_nvml_measure = bool(
-            re.search(r'^\s*nvml_measure_pcie_speeds\s*=\s*true', btop_text, re.MULTILINE)
-        )
-        has_nvidia_shown = bool(
-            re.search(r'^\s*shown_gpus\s*=\s*"[^"]*nvidia[^"]*"', btop_text, re.MULTILINE)
-        )
-
-        if has_nvml_measure or has_nvidia_shown:
-            report.findings.append(
-                AuditFinding(
-                    category="Terminal Monitors",
-                    status="FAIL",
-                    title="btop is configured to poll NVIDIA via NVML",
-                    details=f"In {btop_conf}, shown_gpus or nvml_measure_pcie_speeds queries the RTX card every 500ms, preventing sleep.",
-                    remediation="Run `d3cold fix` to set shown_gpus = 'intel' and nvml_measure_pcie_speeds = false.",
-                )
-            )
+        btxt = btop_conf.read_text()
+        has_nvml = bool(re.search(r"^\s*nvml_measure_pcie_speeds\s*=\s*true", btxt, re.MULTILINE))
+        has_nv_shown = bool(re.search(r'^\s*shown_gpus\s*=\s*"[^"]*nvidia', btxt, re.MULTILINE | re.IGNORECASE))
+        if has_nvml or has_nv_shown:
+            report.add("Terminal Monitors", "WARN", "btop is polling NVIDIA GPU via NVML", "btop.conf polls PCIe bandwidth or NVML on the dGPU.", "Run `d3cold fix` to isolate btop monitoring to iGPU.")
         else:
-            report.findings.append(
-                AuditFinding(
-                    category="Terminal Monitors",
-                    status="PASS",
-                    title="btop configuration is optimized for iGPU only",
-                    details="NVML polling and PCIe bandwidth measurements on NVIDIA are disabled.",
-                )
-            )
+            report.add("Terminal Monitors", "PASS", "btop configuration is optimized for iGPU only", "NVML polling and PCIe bandwidth measurements on NVIDIA are disabled.")
 
-    # Active Client Processes
+    # Active Clients
     clients = get_nvidia_client_processes()
     if clients:
-        proc_list = ", ".join(f"{c['comm']} (PID {c['pid']})" for c in clients[:3])
-        report.findings.append(
-            AuditFinding(
-                category="Active Clients",
-                status="WARN",
-                title=f"{len(clients)} process(es) currently using /dev/nvidia*",
-                details=f"Active clients: {proc_list}. GPU cannot sleep while clients are active.",
-                remediation="Close the listed applications or verify if they are background compute jobs.",
-            )
-        )
+        procs = ", ".join(f"{c['comm']} (PID {c['pid']})" for c in clients[:5])
+        report.add("Active Clients", "FAIL", f"{len(clients)} process(es) holding /dev/nvidia*", f"Active clients: {procs}", "Close GPU-accelerated applications or run `d3cold fix -f`.")
     else:
-        report.findings.append(
-            AuditFinding(
-                category="Active Clients",
-                status="PASS",
-                title="No active processes holding /dev/nvidia*",
-                details="Zero open file descriptors to NVIDIA driver files found in /proc.",
-            )
-        )
+        report.add("Active Clients", "PASS", "No active processes holding /dev/nvidia*", "Zero open file descriptors to NVIDIA driver files found in /proc.")
 
-    # Layer 6: NVIDIA Persistence Daemon
+    # Parent PCIe Root Port Bridge
     try:
-        res_pers = subprocess.run(["systemctl", "is-active", "nvidia-persistenced"], capture_output=True, text=True, timeout=1.0)
-        is_pers_active = res_pers.stdout.strip() == "active"
-    except Exception:
-        is_pers_active = False
-
-    if is_pers_active:
-        report.findings.append(
-            AuditFinding(
-                category="Persistence Daemon",
-                status="FAIL",
-                title="nvidia-persistenced is active (inhibits D3cold sleep)",
-                details="NVIDIA Persistence Daemon keeps the driver context initialized in VRAM 24/7, preventing runtime D3cold.",
-                remediation="Run `d3cold fix` or `sudo systemctl disable --now nvidia-persistenced`.",
-            )
-        )
-    else:
-        report.findings.append(
-            AuditFinding(
-                category="Persistence Daemon",
-                status="PASS",
-                title="nvidia-persistenced is not running",
-                details="Persistence mode is disabled, allowing the kernel to place the GPU in D3cold.",
-            )
-        )
-
-    # Layer 7: Parent PCIe Bridge Runtime PM
-    parent_bridge = dgpu.sysfs_path.resolve().parent
-    parent_ctrl_file = parent_bridge / "power" / "control"
-    if parent_ctrl_file.exists():
-        parent_ctrl = _read_trimmed(parent_ctrl_file)
-        if parent_ctrl == "auto":
-            report.findings.append(
-                AuditFinding(
-                    category="PCIe Root Port",
-                    status="PASS",
-                    title=f"Parent PCIe bridge {parent_bridge.name} is set to 'auto'",
-                    details=f"{parent_ctrl_file} allows upstream link power gating into L2/L3 so the dGPU can enter D3cold (0.0 W).",
-                )
-            )
+        parent = dgpu.sysfs_path.resolve().parent
+        p_ctrl = _read_trimmed(parent / "power" / "control")
+        if p_ctrl == "auto":
+            report.add("PCIe Root Port", "PASS", f"Parent PCIe bridge {parent.name} is set to 'auto'", f"{parent}/power/control allows upstream link power gating.")
         else:
-            report.findings.append(
-                AuditFinding(
-                    category="PCIe Root Port",
-                    status="FAIL",
-                    title=f"Parent PCIe bridge {parent_bridge.name} is '{parent_ctrl}' (inhibiting D3cold)",
-                    details=f"{parent_ctrl_file} must be 'auto'. When set to 'on', the upstream PCIe root port is forced to D0 active, keeping the bus link energized and trapping the NVIDIA dGPU in D3hot (~14 W phantom draw).",
-                    remediation="Run `d3cold fix` to set parent bridge to 'auto'.",
-                )
-            )
+            report.add("PCIe Root Port", "FAIL", f"Parent PCIe bridge {parent.name} power/control is '{p_ctrl}'", f"Parent bridge must be 'auto' for L2/L3 link sleep.", "Run `d3cold fix` to set parent bridge power/control to auto.")
+    except Exception:
+        pass
 
     return report

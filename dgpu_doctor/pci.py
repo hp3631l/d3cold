@@ -1,22 +1,21 @@
-"""Safe PCI and sysfs discovery and query helpers.
-
-CRITICAL RULE:
-Functions in this module must NEVER perform operations that wake a sleeping dGPU.
-- Do NOT run `nvidia-smi`
-- Do NOT probe DRM connector `status` files (causes hardware DDC polling)
-- Do NOT run `lspci` repeatedly (causes PCI config space access)
-- Do NOT read `/proc/driver/nvidia/.../power` repeatedly (probes GPU registers)
-"""
+"""Safe PCI and sysfs discovery helpers (zero-wake design)."""
 
 from __future__ import annotations
 
 import glob
 import os
-import re
 import subprocess
+import time
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Optional
+from typing import Optional, Tuple
+
+
+def _read_trimmed(path: Path) -> str:
+    try:
+        return path.read_text().strip()
+    except OSError:
+        return ""
 
 
 @dataclass
@@ -32,33 +31,15 @@ class GPUDevice:
 
     @property
     def runtime_status(self) -> str:
-        status_file = self.sysfs_path / "power" / "runtime_status"
-        if status_file.exists():
-            try:
-                return status_file.read_text().strip()
-            except OSError:
-                return "unknown"
-        return "unsupported"
+        return _read_trimmed(self.sysfs_path / "power" / "runtime_status") or "unsupported"
 
     @property
     def power_control(self) -> str:
-        control_file = self.sysfs_path / "power" / "control"
-        if control_file.exists():
-            try:
-                return control_file.read_text().strip()
-            except OSError:
-                return "unknown"
-        return "unsupported"
+        return _read_trimmed(self.sysfs_path / "power" / "control") or "unsupported"
 
     @property
     def power_state(self) -> str:
-        state_file = self.sysfs_path / "power_state"
-        if state_file.exists():
-            try:
-                return state_file.read_text().strip()
-            except OSError:
-                return "unknown"
-        return "unknown"
+        return _read_trimmed(self.sysfs_path / "power_state") or "unknown"
 
     @property
     def is_suspended(self) -> bool:
@@ -68,151 +49,95 @@ class GPUDevice:
 _CACHED_NAMES: dict[str, str] = {}
 
 
-def _read_trimmed(path: Path) -> str:
-    try:
-        return path.read_text().strip()
-    except OSError:
-        return ""
-
-
 def _lookup_device_name(addr: str) -> str:
-    if addr in _CACHED_NAMES:
-        return _CACHED_NAMES[addr]
-    # Use udevadm info to read from cached udev database instead of lspci (which probes hardware)
-    try:
-        out = subprocess.check_output(
-            ["udevadm", "info", "-q", "property", "-p", f"/sys/bus/pci/devices/{addr}"],
-            text=True,
-            stderr=subprocess.DEVNULL,
-        )
-        for line in out.splitlines():
-            if line.startswith("ID_MODEL_FROM_DATABASE="):
-                name = line.split("=", 1)[1].strip()
-                _CACHED_NAMES[addr] = name
-                return name
-    except Exception:
-        pass
-
-    _CACHED_NAMES[addr] = "PCI Display Controller"
-    return "PCI Display Controller"
+    if addr not in _CACHED_NAMES:
+        try:
+            out = subprocess.check_output(
+                ["udevadm", "info", "-q", "property", "-p", f"/sys/bus/pci/devices/{addr}"],
+                text=True, stderr=subprocess.DEVNULL,
+            )
+            for line in out.splitlines():
+                if line.startswith("ID_MODEL_FROM_DATABASE="):
+                    _CACHED_NAMES[addr] = line.split("=", 1)[1].strip()
+                    break
+        except Exception:
+            pass
+        _CACHED_NAMES.setdefault(addr, "PCI Display Controller")
+    return _CACHED_NAMES[addr]
 
 
 def find_gpus() -> list[GPUDevice]:
-    """Discover all display controllers on the PCI bus."""
-    devices: list[GPUDevice] = []
+    devices = []
     base = Path("/sys/bus/pci/devices")
     if not base.exists():
         return devices
-
     for dev in sorted(base.iterdir()):
-        class_str = _read_trimmed(dev / "class")
-        if not (class_str.startswith("0x0300") or class_str.startswith("0x0302") or class_str.startswith("0x0380")):
-            continue
-
-        vendor_id = _read_trimmed(dev / "vendor").lower()
-        device_id = _read_trimmed(dev / "device").lower()
-        boot_vga = _read_trimmed(dev / "boot_vga") == "1"
-
-        is_nvidia = vendor_id == "0x10de"
-        name = _lookup_device_name(dev.name)
-
-        devices.append(
-            GPUDevice(
+        cls = _read_trimmed(dev / "class")
+        if cls.startswith(("0x0300", "0x0302", "0x0380")):
+            vid = _read_trimmed(dev / "vendor").lower()
+            devices.append(GPUDevice(
                 pci_address=dev.name,
-                vendor_id=vendor_id,
-                device_id=device_id,
-                class_id=class_str,
-                is_nvidia=is_nvidia,
-                is_primary=boot_vga,
+                vendor_id=vid,
+                device_id=_read_trimmed(dev / "device").lower(),
+                class_id=cls,
+                is_nvidia=(vid == "0x10de"),
+                is_primary=(_read_trimmed(dev / "boot_vga") == "1"),
                 sysfs_path=dev,
-                name=name,
-            )
-        )
+                name=_lookup_device_name(dev.name),
+            ))
     return devices
 
 
 def find_nvidia_dgpu() -> Optional[GPUDevice]:
-    """Find the discrete NVIDIA GPU."""
-    for gpu in find_gpus():
-        if gpu.is_nvidia:
-            return gpu
-    return None
+    return next((g for g in find_gpus() if g.is_nvidia), None)
 
 
 def find_igpu() -> Optional[GPUDevice]:
-    """Find the integrated GPU (non-NVIDIA display controller)."""
-    for gpu in find_gpus():
-        if not gpu.is_nvidia:
-            return gpu
-    return None
+    return next((g for g in find_gpus() if not g.is_nvidia), None)
+
+
+def _find_drm_card(gpu: Optional[GPUDevice], fallback: Optional[str] = None) -> Optional[str]:
+    if gpu:
+        by_path = Path(f"/dev/dri/by-path/pci-{gpu.pci_address}-card")
+        if by_path.exists():
+            return str(by_path.resolve())
+        drm_dir = gpu.sysfs_path / "drm"
+        if drm_dir.exists():
+            cards = sorted(drm_dir.glob("card*"))
+            if cards:
+                return f"/dev/dri/{cards[0].name}"
+    for c in ("/dev/dri/card2", "/dev/dri/card1", "/dev/dri/card0"):
+        if fallback and Path(c).exists():
+            return c
+    return fallback
 
 
 def find_igpu_drm_card() -> str:
-    """Find the DRI card device path for the integrated GPU (e.g. /dev/dri/card2)."""
-    igpu = find_igpu()
-    if igpu:
-        by_path = Path(f"/dev/dri/by-path/pci-{igpu.pci_address}-card")
-        if by_path.exists():
-            try:
-                return str(by_path.resolve())
-            except OSError:
-                pass
-        drm_dir = igpu.sysfs_path / "drm"
-        if drm_dir.exists():
-            for card in sorted(drm_dir.glob("card*")):
-                return f"/dev/dri/{card.name}"
-    for candidate in ("/dev/dri/card2", "/dev/dri/card1", "/dev/dri/card0"):
-        if Path(candidate).exists():
-            return candidate
-    return "/dev/dri/card2"
+    return _find_drm_card(find_igpu(), fallback="/dev/dri/card2") or "/dev/dri/card2"
 
 
 def find_dgpu_drm_card() -> Optional[str]:
-    """Find the DRI card device path for the discrete NVIDIA GPU (e.g. /dev/dri/card1)."""
-    dgpu = find_nvidia_dgpu()
-    if dgpu:
-        by_path = Path(f"/dev/dri/by-path/pci-{dgpu.pci_address}-card")
-        if by_path.exists():
-            try:
-                return str(by_path.resolve())
-            except OSError:
-                pass
-        drm_dir = dgpu.sysfs_path / "drm"
-        if drm_dir.exists():
-            for card in sorted(drm_dir.glob("card*")):
-                return f"/dev/dri/{card.name}"
-    return None
+    return _find_drm_card(find_nvidia_dgpu())
 
 
 def find_nvidia_audio() -> Optional[Path]:
-    """Find the NVIDIA HDMI/DP Audio controller function (0x040300) on the same slot."""
     base = Path("/sys/bus/pci/devices")
-    if not base.exists():
-        return None
-    for dev in base.iterdir():
-        class_str = _read_trimmed(dev / "class")
-        vendor_id = _read_trimmed(dev / "vendor").lower()
-        if vendor_id == "0x10de" and class_str.startswith("0x0403"):
-            return dev
+    if base.exists():
+        for dev in base.iterdir():
+            if _read_trimmed(dev / "vendor").lower() == "0x10de" and _read_trimmed(dev / "class").startswith("0x0403"):
+                return dev
     return None
 
 
 def get_nvidia_client_processes() -> list[dict]:
-    """Find processes holding open file descriptors to /dev/nvidia* or /dev/dri render nodes.
-
-    Scans /proc directly without calling nvidia-smi or opening devices.
-    Compositors (Hyprland, Xwayland, etc.) holding DRM nodes for KMS display hotplug
-    do not prevent D3cold and are not flagged as rogue blocking clients.
-    """
     clients = []
-    compositor_comms = {"hyprland", "xwayland", "sway", "kwin", "gnome-shell", "mutter", "wayfire"}
+    compositors = {"hyprland", "xwayland", "sway", "kwin", "gnome-shell", "mutter", "wayfire"}
     for fd_path in glob.glob("/proc/[0-9]*/fd/*"):
         try:
             target = os.readlink(fd_path)
-            is_nvidia_char = target.startswith("/dev/nvidia")
-            is_render_node = target.startswith("/dev/dri/renderD128")
-
-            if is_nvidia_char or is_render_node:
+            is_nv = target.startswith("/dev/nvidia")
+            is_render = target.startswith("/dev/dri/renderD128")
+            if is_nv or is_render:
                 pid = fd_path.split("/")[2]
                 try:
                     with open(f"/proc/{pid}/cmdline", "rb") as cf:
@@ -221,65 +146,39 @@ def get_nvidia_client_processes() -> list[dict]:
                         comm = cmf.read().strip()
                 except OSError:
                     cmd, comm = "unknown", "unknown"
-
-                if is_render_node and comm.lower() in compositor_comms:
+                if is_render and comm.lower() in compositors:
                     continue
-
-                clients.append({
-                    "pid": int(pid),
-                    "comm": comm,
-                    "cmdline": cmd,
-                    "target": target,
-                })
+                clients.append({"pid": int(pid), "comm": comm, "cmdline": cmd, "target": target})
         except OSError:
             pass
-
     # Deduplicate by PID
     seen = set()
-    deduped = []
-    for c in clients:
-        if c["pid"] not in seen:
-            seen.add(c["pid"])
-            deduped.append(c)
-    return deduped
+    return [c for c in clients if not (c["pid"] in seen or seen.add(c["pid"]))]
 
 
 def get_battery_energy_rate() -> Tuple[Optional[float], str]:
-    """Read the current system battery power rate in Watts and power status ('Discharging', 'Charging', 'Full', 'AC')."""
-    for bat in glob.glob("/sys/class/power_supply/BAT*"):
-        bat_path = Path(bat)
-        status_file = bat_path / "status"
-        status = _read_trimmed(status_file) if status_file.exists() else "Unknown"
-        power_file = bat_path / "power_now"
-        current_file = bat_path / "current_now"
-        voltage_file = bat_path / "voltage_now"
+    for bat in map(Path, glob.glob("/sys/class/power_supply/BAT*")):
+        status = _read_trimmed(bat / "status") or "Unknown"
         try:
-            val = None
-            if power_file.exists():
-                val = int(power_file.read_text().strip()) / 1e6
-            elif current_file.exists() and voltage_file.exists():
-                c = int(current_file.read_text().strip())
-                v = int(voltage_file.read_text().strip())
-                val = (c * v) / 1e12
-            if val is not None:
-                return val, status
+            p_file = bat / "power_now"
+            if p_file.exists():
+                return int(p_file.read_text().strip()) / 1e6, status
+            c_file, v_file = bat / "current_now", bat / "voltage_now"
+            if c_file.exists() and v_file.exists():
+                return (int(c_file.read_text().strip()) * int(v_file.read_text().strip())) / 1e12, status
         except (ValueError, OSError):
             pass
     return None, "AC"
 
 
 def get_cpu_package_power(duration: float = 0.5) -> Optional[float]:
-    """Calculate CPU Package power draw via Intel RAPL over a short sampling interval."""
-    import time
-    rapl_path = Path("/sys/class/powercap/intel-rapl/intel-rapl:0/energy_uj")
-    if not rapl_path.exists():
+    rapl = Path("/sys/class/powercap/intel-rapl/intel-rapl:0/energy_uj")
+    if not rapl.exists():
         return None
     try:
-        e1 = int(rapl_path.read_text().strip())
-        t1 = time.time()
+        e1, t1 = int(rapl.read_text().strip()), time.time()
         time.sleep(duration)
-        e2 = int(rapl_path.read_text().strip())
-        t2 = time.time()
+        e2, t2 = int(rapl.read_text().strip()), time.time()
         return (e2 - e1) / (t2 - t1) / 1e6
     except (ValueError, OSError):
         return None
