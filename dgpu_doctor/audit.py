@@ -147,7 +147,16 @@ def run_audit() -> AuditReport:
     clients = get_nvidia_client_processes()
     if clients:
         procs = ", ".join(f"{c['comm']} (PID {c['pid']})" for c in clients[:5])
-        report.add("Active Clients", "FAIL", f"{len(clients)} process(es) holding /dev/nvidia*", f"Active clients: {procs}", "Close GPU-accelerated applications or run `d3cold fix -f`.")
+        compositors = {"hyprland", "xwayland", "sway", "kwin", "gnome-shell", "mutter", "wayfire"}
+        non_compositors = [c for c in clients if c["comm"].lower() not in compositors]
+
+        if dgpu.is_suspended:
+            if not non_compositors:
+                report.add("Active Clients", "PASS", "Compositor holds dormant descriptors (dGPU asleep)", f"Dormant clients: {procs}. Fine-grained Runtime D3 maintains D3cold.")
+            else:
+                report.add("Active Clients", "WARN", f"{len(clients)} dormant client(s) (dGPU asleep)", f"Clients: {procs}. dGPU is suspended in D3cold; apps will wake GPU when used.")
+        else:
+            report.add("Active Clients", "FAIL", f"{len(clients)} process(es) holding /dev/nvidia*", f"Active clients: {procs}", "Close GPU-accelerated applications or run `d3cold fix -f`.")
     else:
         report.add("Active Clients", "PASS", "No active processes holding /dev/nvidia*", "Zero open file descriptors to NVIDIA driver files found in /proc.")
 

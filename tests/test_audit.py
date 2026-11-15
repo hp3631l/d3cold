@@ -127,6 +127,50 @@ class TestDGPUAudit(unittest.TestCase):
         self.assertIsNotNone(gaming_finding)
         self.assertEqual(gaming_finding.status, "FAIL")
 
+    @patch("dgpu_doctor.audit.find_nvidia_dgpu")
+    @patch("dgpu_doctor.audit.find_nvidia_audio")
+    @patch("dgpu_doctor.audit.get_nvidia_client_processes")
+    def test_suspended_with_compositor_client_passes(self, mock_clients, mock_audio, mock_dgpu):
+        mock_gpu = MagicMock(spec=GPUDevice)
+        mock_gpu.name = "NVIDIA GeForce RTX 4050 Laptop GPU"
+        mock_gpu.pci_address = "0000:01:00.0"
+        mock_gpu.runtime_status = "suspended"
+        mock_gpu.power_control = "auto"
+        mock_gpu.is_suspended = True
+        mock_gpu.sysfs_path = Path("/sys/bus/pci/devices/0000:01:00.0")
+
+        mock_dgpu.return_value = mock_gpu
+        mock_audio.return_value = None
+        mock_clients.return_value = [{"pid": 1344, "comm": "Hyprland", "cmdline": "Hyprland", "target": "/dev/nvidia0"}]
+
+        report = run_audit()
+        clients_finding = next((f for f in report.findings if f.category == "Active Clients"), None)
+        self.assertIsNotNone(clients_finding)
+        self.assertEqual(clients_finding.status, "PASS")
+        self.assertFalse(report.has_failures)
+
+    @patch("dgpu_doctor.audit.find_nvidia_dgpu")
+    @patch("dgpu_doctor.audit.find_nvidia_audio")
+    @patch("dgpu_doctor.audit.get_nvidia_client_processes")
+    def test_active_with_client_fails(self, mock_clients, mock_audio, mock_dgpu):
+        mock_gpu = MagicMock(spec=GPUDevice)
+        mock_gpu.name = "NVIDIA GeForce RTX 4050 Laptop GPU"
+        mock_gpu.pci_address = "0000:01:00.0"
+        mock_gpu.runtime_status = "active"
+        mock_gpu.power_control = "auto"
+        mock_gpu.is_suspended = False
+        mock_gpu.sysfs_path = Path("/sys/bus/pci/devices/0000:01:00.0")
+
+        mock_dgpu.return_value = mock_gpu
+        mock_audio.return_value = None
+        mock_clients.return_value = [{"pid": 5000, "comm": "game", "cmdline": "game", "target": "/dev/nvidia0"}]
+
+        report = run_audit()
+        clients_finding = next((f for f in report.findings if f.category == "Active Clients"), None)
+        self.assertIsNotNone(clients_finding)
+        self.assertEqual(clients_finding.status, "FAIL")
+        self.assertTrue(report.has_failures)
+
 
 if __name__ == "__main__":
     unittest.main()

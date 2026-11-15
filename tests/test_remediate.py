@@ -64,6 +64,21 @@ class TestRemediate(unittest.TestCase):
             self.assertTrue(runner.exists())
             self.assertIn("__NV_PRIME_RENDER_OFFLOAD=1", runner.read_text())
 
+    @patch("dgpu_doctor.pci.get_nvidia_client_processes")
+    @patch("os.kill")
+    def test_kill_nvidia_clients_skips_compositors(self, mock_kill, mock_clients):
+        from dgpu_doctor.remediate import kill_nvidia_clients
+        mock_clients.return_value = [
+            {"pid": 1344, "comm": "Hyprland", "cmdline": "Hyprland", "target": "/dev/nvidia0"},
+            {"pid": 9999, "comm": "some_app", "cmdline": "some_app", "target": "/dev/nvidia0"},
+        ]
+        results = kill_nvidia_clients(force=True)
+        # Verify Hyprland (1344) was NOT killed, but some_app (9999) was killed
+        killed_pids = [r[0] for r in results]
+        self.assertNotIn(1344, killed_pids)
+        self.assertIn(9999, killed_pids)
+        mock_kill.assert_any_call(9999, unittest.mock.ANY)
+
 
 if __name__ == "__main__":
     unittest.main()

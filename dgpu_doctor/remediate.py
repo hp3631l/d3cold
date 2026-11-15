@@ -199,8 +199,11 @@ def kill_nvidia_clients(force: bool = False) -> List[Tuple[int, str, bool]]:
     if not force:
         return results
     import signal
+    compositors = {"hyprland", "xwayland", "sway", "kwin", "gnome-shell", "mutter", "wayfire"}
     for c in get_nvidia_client_processes():
         pid, comm = c["pid"], c["comm"]
+        if comm.lower() in compositors:
+            continue
         try:
             os.kill(pid, signal.SIGTERM)
             time.sleep(0.2)
