@@ -55,6 +55,32 @@ class TestRemediate(unittest.TestCase):
             self.assertIn("nvml_measure_pcie_speeds = false", content)
 
     @patch("pathlib.Path.home")
+    @patch("dgpu_doctor.pci.find_igpu")
+    def test_fix_btop_amd_igpu(self, mock_igpu, mock_home):
+        from dgpu_doctor.pci import GPUDevice
+        mock_igpu.return_value = GPUDevice("0000:c3:00.0", "0x1002", "0x164c", "0x030000", False, True, Path("/fake"))
+        with tempfile.TemporaryDirectory() as tmpdir:
+            base = Path(tmpdir)
+            mock_home.return_value = base
+            conf_dir = base / ".config/btop"
+            conf_dir.mkdir(parents=True)
+            conf_file = conf_dir / "btop.conf"
+            conf_file.write_text('shown_gpus = "auto"\n')
+
+            ok, msg = fix_btop()
+            self.assertTrue(ok)
+            content = conf_file.read_text()
+            self.assertIn('shown_gpus = "amd"', content)
+
+    @patch("subprocess.run")
+    def test_fix_persistence_mode(self, mock_run):
+        from dgpu_doctor.remediate import fix_persistence_mode
+        mock_run.return_value = MagicMock(returncode=0, stdout="active\n")
+        ok, msg = fix_persistence_mode()
+        self.assertTrue(ok)
+        self.assertIn("nvidia-persistenced", msg)
+
+    @patch("pathlib.Path.home")
     def test_install_prime_run(self, mock_home):
         with tempfile.TemporaryDirectory() as tmpdir:
             mock_home.return_value = Path(tmpdir)

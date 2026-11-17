@@ -94,8 +94,14 @@ def run_audit() -> AuditReport:
     # Layer 3: Persistence Mode / Daemon
     params_file = Path("/proc/driver/nvidia/params")
     p_mode = bool(re.search(r"PersistenceMode:\s*1", params_file.read_text())) if params_file.exists() else False
-    if p_mode:
-        report.add("Persistence Mode", "FAIL", "NVIDIA driver persistence mode is ON", "GPU driver maintains persistent state in VRAM.", "Run `nvidia-smi -pm 0` or `d3cold fix` to disable persistence mode.")
+    is_svc = False
+    try:
+        is_svc = subprocess.run(["systemctl", "is-active", "nvidia-persistenced.service"], capture_output=True, text=True).stdout.strip() == "active"
+    except Exception:
+        pass
+
+    if p_mode or is_svc:
+        report.add("Persistence Mode", "FAIL", "NVIDIA driver persistence mode is ON", "GPU driver maintains persistent state in VRAM.", "Run `d3cold fix` to disable persistence daemon and persistence mode.")
     else:
         report.add("Persistence Mode", "PASS", "nvidia-persistenced is inactive", "Persistence daemon is not keeping driver initialized.")
 
@@ -120,10 +126,16 @@ def run_audit() -> AuditReport:
     h_conf, u_conf, u_base = Path.home() / ".config/environment.d/10-hyprland-gpu.conf", Path.home() / ".config/uwsm/env-hyprland", Path.home() / ".config/uwsm/env"
 
     has_aq = bool(igpu_card and (igpu_card in aq_drm or (h_conf.exists() and igpu_card in h_conf.read_text()) or (u_conf.exists() and igpu_card in u_conf.read_text())))
+    is_hyprland = any(
+        "hyprland" in os.environ.get(k, "").lower() for k in ("XDG_CURRENT_DESKTOP", "DESKTOP_SESSION")
+    ) or Path.home().joinpath(".config/hypr").exists()
+
     if has_aq:
         report.add("Compositor GPU", "PASS", "Compositor display engine pinned to iGPU", f"AQ_DRM_DEVICES pins primary render node to {igpu_card}.")
-    else:
+    elif is_hyprland:
         report.add("Compositor GPU", "WARN", "Compositor display engine not pinned to iGPU", "AQ_DRM_DEVICES not explicitly configuring iGPU as primary.", "Run `d3cold fix` to pin compositor display engine to iGPU.")
+    else:
+        report.add("Compositor GPU", "PASS", "Standard desktop environment active", "Desktop environment does not require AQ_DRM_DEVICES pinning.")
 
     has_vk = bool(os.environ.get("VK_DRIVER_FILES")) or any(f.exists() and "VK_DRIVER_FILES" in f.read_text() for f in (h_conf, u_conf, u_base))
     has_egl = bool(os.environ.get("__EGL_VENDOR_LIBRARY_FILENAMES")) or any(f.exists() and "__EGL_VENDOR_LIBRARY_FILENAMES" in f.read_text() for f in (h_conf, u_conf, u_base))

@@ -1,145 +1,170 @@
 #!/usr/bin/env bash
-# Power profile switcher for Lenovo LOQ 15IAX9E: Battery Deep Power Saving vs AC Balanced vs Gaming Performance
-
-set -e
+# Universal Power Profile Switcher: Battery Deep Power Saving vs AC Balanced vs Gaming Performance
+# Portable across all laptop vendors (Lenovo, ASUS, Dell, HP, Acer, Framework, Intel, AMD, etc.)
 
 MODE="${1:-auto}"
-AC_ONLINE=$(cat /sys/class/power_supply/ADP0/online 2>/dev/null || cat /sys/class/power_supply/ACAD/online 2>/dev/null || echo "0")
-PROFILE_NODE="/sys/devices/platform/legion/platform-profile/platform-profile-0/profile"
-FULLSPEED_NODE="/sys/devices/platform/legion/fan_fullspeed"
-IGPU_MAX_FREQ_NODE="/sys/bus/pci/devices/0000:00:02.0/drm/card2/gt_max_freq_mhz"
-DGPU_STATUS_NODE="/sys/bus/pci/devices/0000:01:00.0/power/runtime_status"
 
-# Idempotent sysfs writer: skips redundant writes to prevent triggering Lenovo EC WMI SmartFan wakeups
-_write_legion() {
-    local node="$1"
-    local val="$2"
-    if [ -f "$node" ]; then
-        local cur
-        cur=$(cat "$node" 2>/dev/null || true)
-        if [ "$cur" = "$val" ]; then
+# 1. Universal AC detection across any kernel / power supply naming scheme
+is_ac_online() {
+    # Check power supplies of type Mains or USB
+    for ps in /sys/class/power_supply/*; do
+        [ -d "$ps" ] || continue
+        local ptype
+        ptype=$(cat "$ps/type" 2>/dev/null || true)
+        if [ "$ptype" = "Mains" ] || [ "$ptype" = "USB" ]; then
+            if [ "$(cat "$ps/online" 2>/dev/null)" = "1" ]; then
+                return 0
+            fi
+        fi
+    done
+    # Fallback: check AC* or ADP* nodes
+    for ps in /sys/class/power_supply/AC* /sys/class/power_supply/ADP*; do
+        [ -e "$ps/online" ] || continue
+        if [ "$(cat "$ps/online" 2>/dev/null)" = "1" ]; then
             return 0
         fi
-    fi
-    sudo -n /usr/local/bin/omalegion-write write "$node" "$val" > /dev/null 2>&1 || true
+    done
+    # Fallback: check battery status (Charging / Full => on AC)
+    for bat in /sys/class/power_supply/BAT* /sys/class/power_supply/*battery*; do
+        [ -d "$bat" ] || continue
+        local bstat
+        bstat=$(cat "$bat/status" 2>/dev/null || true)
+        if [ "$bstat" = "Charging" ] || [ "$bstat" = "Full" ]; then
+            return 0
+        fi
+    done
+    return 1
 }
 
-_apply_cpu() {
-    local profile="$1"
+if is_ac_online; then
+    AC_ONLINE=1
+else
+    AC_ONLINE=0
+fi
+
+# 2. Universal CPU and ACPI Platform Profile
+_apply_profile() {
+    local profile="$1" # "performance", "balanced", or "power-saver"
+    
+    # Desktop standard daemon (power-profiles-daemon)
     if command -v powerprofilesctl >/dev/null 2>&1; then
-        local cur_prof
-        cur_prof=$(powerprofilesctl get 2>/dev/null || true)
-        if [ "$cur_prof" != "$profile" ]; then
-            powerprofilesctl set "$profile" >/dev/null 2>&1 || true
+        powerprofilesctl set "$profile" 2>/dev/null || true
+    fi
+    
+    # Kernel ACPI platform_profile standard (all vendors)
+    local acpi_profile_node="/sys/firmware/acpi/platform_profile"
+    local acpi_choices_node="/sys/firmware/acpi/platform_profile_choices"
+    if [ -w "$acpi_profile_node" ] && [ -f "$acpi_choices_node" ]; then
+        local choices
+        choices=$(cat "$acpi_choices_node" 2>/dev/null || true)
+        local target=""
+        case "$profile" in
+            performance)
+                if echo "$choices" | grep -qw "performance"; then target="performance"; fi
+                ;;
+            balanced)
+                if echo "$choices" | grep -qw "balanced"; then target="balanced"; fi
+                ;;
+            power-saver)
+                if echo "$choices" | grep -qw "low-power"; then
+                    target="low-power"
+                elif echo "$choices" | grep -qw "quiet"; then
+                    target="quiet"
+                fi
+                ;;
+        esac
+        if [ -n "$target" ]; then
+            echo "$target" > "$acpi_profile_node" 2>/dev/null || true
         fi
     fi
-    if command -v ryoku-power >/dev/null 2>&1; then
-        sudo -n /usr/local/bin/ryoku-power apply-profile "$profile" > /dev/null 2>&1 || true
+
+    # Vendor-specific fallbacks (only invoked if hardware node physically exists)
+    # Lenovo Legion/LOQ
+    local legion_node="/sys/devices/platform/legion/platform-profile/platform-profile-0/profile"
+    if [ -f "$legion_node" ]; then
+        local leg_target="$profile"
+        if [ "$profile" = "power-saver" ]; then leg_target="low-power"; fi
+        echo "$leg_target" | sudo -n tee "$legion_node" >/dev/null 2>&1 || true
+    fi
+    
+    # ASUS ROG / TUF throttle_thermal_policy (0=normal, 1=boost, 2=silent)
+    local asus_node="/sys/devices/platform/asus-nb-wmi/throttle_thermal_policy"
+    if [ -f "$asus_node" ]; then
+        local asus_val=0
+        if [ "$profile" = "performance" ]; then asus_val=1; elif [ "$profile" = "power-saver" ]; then asus_val=2; fi
+        echo "$asus_val" | sudo -n tee "$asus_node" >/dev/null 2>&1 || true
     fi
 }
 
+# 3. WiFi power management (Universal via iw)
 WIFI_IFACE=$(iw dev 2>/dev/null | awk '$1=="Interface"{print $2; exit}')
-
 _set_wifi_powersave() {
     local state="$1"
     if [ -n "$WIFI_IFACE" ]; then
-        local cur_state
-        cur_state=$(iw dev "$WIFI_IFACE" get power_save 2>/dev/null | awk '{print $3}' || true)
-        if [ "$cur_state" != "$state" ]; then
-            iw dev "$WIFI_IFACE" set power_save "$state" 2>/dev/null || true
-        fi
+        iw dev "$WIFI_IFACE" set power_save "$state" 2>/dev/null || true
     fi
+}
+
+# 4. Intel iGPU max frequency tuning (Only if Intel iGPU is present)
+_tune_igpu() {
+    local freq="$1"
+    for node in /sys/bus/pci/devices/*/drm/card*/gt_max_freq_mhz; do
+        [ -f "$node" ] || continue
+        echo "$freq" | sudo -n tee "$node" >/dev/null 2>&1 || true
+    done
 }
 
 if [ "$MODE" = "game" ] || [ "$MODE" = "full" ] || [ "$MODE" = "custom" ]; then
     echo "🎮 Switching to GAMING / MAXIMUM PERFORMANCE MODE"
-    
-    # 1. CPU profile to performance (governor: performance, EPP: performance, maxFreq: 100%)
-    _apply_cpu "performance"
-    
-    # 2. Restore full Intel iGPU boost frequency (1450 MHz)
-    _write_legion "$IGPU_MAX_FREQ_NODE" "1450"
-    
-    # 3. Disable WiFi power saving for minimum online latency
+    _apply_profile "performance"
     _set_wifi_powersave "off"
-
-    # 4. PCIe performance (WiFi, Ethernet on)
-    _write_legion "/sys/bus/pci/devices/0000:00:14.3/power/control" "on"
-    _write_legion "/sys/bus/pci/devices/0000:00:15.0/power/control" "on"
-    _write_legion "/sys/bus/pci/devices/0000:00:15.1/power/control" "on"
-    _write_legion "/sys/bus/pci/devices/0000:00:01.0/power/control" "on"
+    _tune_igpu "1450"
     
-    # 5. Switch Lenovo profile to custom (required for fan_fullspeed)
-    _write_legion "$PROFILE_NODE" "custom"
-    
-    # 6. Turn on full speed fan (5600 RPM max hardware speed)
-    _write_legion "$FULLSPEED_NODE" "1"
-    
-    echo "✅ Gaming mode active: Max CPU/iGPU Clocks, Fan MAX (5600 RPM)."
+    # Optional Lenovo full speed fan if hardware node exists
+    if [ -f "/sys/devices/platform/legion/fan_fullspeed" ]; then
+        echo "1" | sudo -n tee "/sys/devices/platform/legion/fan_fullspeed" >/dev/null 2>&1 || true
+    fi
+    echo "✅ Gaming mode active: Performance profile applied."
     exit 0
 fi
 
 if [ "$AC_ONLINE" = "1" ] || [ "$MODE" = "ac" ] || [ "$MODE" = "balance" ]; then
     echo "⚡ AC Power detected -> Restoring DEFAULT / NORMAL BALANCED STATE"
-    
-    # 1. Restore CPU profile to balanced (governor: powersave, EPP: balance_performance, maxFreq: 100%)
-    _apply_cpu "balanced"
-    
-    # 2. Restore full Intel iGPU frequency (1450 MHz)
-    _write_legion "$IGPU_MAX_FREQ_NODE" "1450"
-    
-    # 3. Turn off full speed fan forcing
-    _write_legion "$FULLSPEED_NODE" "0"
-    
-    # 4. Restore Lenovo Platform Profile to balanced
-    _write_legion "$PROFILE_NODE" "balanced"
-    
-    # 5. Disable WiFi power saving for responsive browsing/streaming
+    _apply_profile "balanced"
     _set_wifi_powersave "off"
-
-    # 6. Restore PCIe performance on AC (WiFi)
-    _write_legion "/sys/bus/pci/devices/0000:00:14.3/power/control" "on"
-    _write_legion "/sys/bus/pci/devices/0000:00:15.0/power/control" "on"
-    _write_legion "/sys/bus/pci/devices/0000:00:15.1/power/control" "on"
-    _write_legion "/sys/bus/pci/devices/0000:00:01.0/power/control" "on"
+    _tune_igpu "1450"
     
+    if [ -f "/sys/devices/platform/legion/fan_fullspeed" ]; then
+        echo "0" | sudo -n tee "/sys/devices/platform/legion/fan_fullspeed" >/dev/null 2>&1 || true
+    fi
     echo "✅ System restored to normal balanced AC state."
 
 else
-    echo "🔋 Battery detected -> Applying DEEP POWER SAVING (<10W Target)"
-    
-    # 1. CPU profile to power-saver (governor: powersave, EPP: power, maxFreq: 50%)
-    _apply_cpu "power-saver"
-    
-    # 2. Clamp Intel iGPU max frequency to 400 MHz (saves ~1.0W–1.5W of System Agent draw)
-    _write_legion "$IGPU_MAX_FREQ_NODE" "400"
-    
-    # 3. Turn off full speed fan forcing
-    _write_legion "$FULLSPEED_NODE" "0"
-    
-    # 4. Set Lenovo Platform Profile to low-power (Quiet Mode)
-    _write_legion "$PROFILE_NODE" "low-power"
-    
-    # 5. Enable WiFi power saving
+    echo "🔋 Battery detected -> Applying DEEP POWER SAVING"
+    _apply_profile "power-saver"
     _set_wifi_powersave "on"
-
-    # 6. Enable runtime PM on non-critical PCIe devices (Ethernet, WiFi)
-    _write_legion "/sys/bus/pci/devices/0000:07:00.0/power/control" "auto"
-    _write_legion "/sys/bus/pci/devices/0000:00:14.3/power/control" "auto"
-
-    # 7. Protect critical host controllers and buses
-    # Touchpad I2C controllers must remain ON
-    _write_legion "/sys/bus/pci/devices/0000:00:15.0/power/control" "on"
-    _write_legion "/sys/bus/pci/devices/0000:00:15.1/power/control" "on"
-    # Root port for dGPU must remain ON to avoid link timeouts and shutdown hangs
-    _write_legion "/sys/bus/pci/devices/0000:00:01.0/power/control" "on"
+    _tune_igpu "400"
     
+    if [ -f "/sys/devices/platform/legion/fan_fullspeed" ]; then
+        echo "0" | sudo -n tee "/sys/devices/platform/legion/fan_fullspeed" >/dev/null 2>&1 || true
+    fi
+
+    # Trigger d3cold suspend so dGPU safely sleeps on battery
+    if command -v d3cold >/dev/null 2>&1; then
+        d3cold suspend >/dev/null 2>&1 || true
+    fi
+
     echo "✅ Deep battery power saving active."
     
     # Check current discharge rate
-    if [ -f /sys/class/power_supply/BAT0/power_now ]; then
-        NOW=$(cat /sys/class/power_supply/BAT0/power_now)
-        WATTS=$(awk "BEGIN {printf \"%.2f\", $NOW/1000000}")
-        echo "📊 Current Battery Draw: ${WATTS} W"
-    fi
+    for pnow in /sys/class/power_supply/*/power_now; do
+        if [ -f "$pnow" ]; then
+            NOW=$(cat "$pnow" 2>/dev/null || echo 0)
+            if [ "$NOW" -gt 0 ] 2>/dev/null; then
+                WATTS=$(awk "BEGIN {printf \"%.2f\", $NOW/1000000}")
+                echo "📊 Current Battery Draw: ${WATTS} W"
+                break
+            fi
+        fi
+    done
 fi

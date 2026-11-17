@@ -113,7 +113,7 @@ def _find_drm_card(gpu: Optional[GPUDevice], fallback: Optional[str] = None) -> 
 
 
 def find_igpu_drm_card() -> str:
-    return _find_drm_card(find_igpu(), fallback="/dev/dri/card2") or "/dev/dri/card2"
+    return _find_drm_card(find_igpu(), fallback="/dev/dri/card0") or "/dev/dri/card0"
 
 
 def find_dgpu_drm_card() -> Optional[str]:
@@ -132,11 +132,20 @@ def find_nvidia_audio() -> Optional[Path]:
 def get_nvidia_client_processes() -> list[dict]:
     clients = []
     compositors = {"hyprland", "xwayland", "sway", "kwin", "gnome-shell", "mutter", "wayfire"}
+    dgpu = find_nvidia_dgpu()
+    nv_render = None
+    if dgpu:
+        drm_dir = dgpu.sysfs_path / "drm"
+        if drm_dir.exists():
+            renders = list(drm_dir.glob("renderD*"))
+            if renders:
+                nv_render = f"/dev/dri/{renders[0].name}"
+
     for fd_path in glob.glob("/proc/[0-9]*/fd/*"):
         try:
             target = os.readlink(fd_path)
             is_nv = target.startswith("/dev/nvidia")
-            is_render = target.startswith("/dev/dri/renderD128")
+            is_render = (nv_render and target == nv_render)
             if is_nv or is_render:
                 pid = fd_path.split("/")[2]
                 try:
@@ -157,24 +166,28 @@ def get_nvidia_client_processes() -> list[dict]:
 
 
 def get_battery_energy_rate() -> Tuple[Optional[float], str]:
-    for bat in map(Path, glob.glob("/sys/class/power_supply/BAT*")):
-        status = _read_trimmed(bat / "status") or "Unknown"
-        try:
-            p_file = bat / "power_now"
-            if p_file.exists():
-                return int(p_file.read_text().strip()) / 1e6, status
-            c_file, v_file = bat / "current_now", bat / "voltage_now"
-            if c_file.exists() and v_file.exists():
-                return (int(c_file.read_text().strip()) * int(v_file.read_text().strip())) / 1e12, status
-        except (ValueError, OSError):
-            pass
+    for ps_path in glob.glob("/sys/class/power_supply/*"):
+        ps = Path(ps_path)
+        ps_type = _read_trimmed(ps / "type").lower()
+        if ps_type == "battery" or ps.name.startswith(("BAT", "CMB")):
+            status = _read_trimmed(ps / "status") or "Unknown"
+            try:
+                p_file = ps / "power_now"
+                if p_file.exists():
+                    return int(p_file.read_text().strip()) / 1e6, status
+                c_file, v_file = ps / "current_now", ps / "voltage_now"
+                if c_file.exists() and v_file.exists():
+                    return (int(c_file.read_text().strip()) * int(v_file.read_text().strip())) / 1e12, status
+            except (ValueError, OSError):
+                pass
     return None, "AC"
 
 
 def get_cpu_package_power(duration: float = 0.5) -> Optional[float]:
-    rapl = Path("/sys/class/powercap/intel-rapl/intel-rapl:0/energy_uj")
-    if not rapl.exists():
+    rapls = list(Path("/sys/class/powercap").glob("*/*/energy_uj")) or list(Path("/sys/class/powercap").glob("*/energy_uj"))
+    if not rapls:
         return None
+    rapl = rapls[0]
     try:
         e1, t1 = int(rapl.read_text().strip()), time.time()
         time.sleep(duration)

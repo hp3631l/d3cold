@@ -56,16 +56,30 @@ def fix_btop() -> Tuple[bool, str]:
     if not conf.exists():
         return False, "btop.conf does not exist."
     try:
+        from .pci import find_igpu
+        igpu = find_igpu()
+        igpu_target = "amd" if igpu and igpu.vendor_id == "0x1002" else "intel"
         text = conf.read_text()
         mod = re.sub(r'show_gpu_info\s*=\s*"Auto"', 'show_gpu_info = "Off"', text)
         mod = re.sub(r"nvml_measure_pcie_speeds\s*=\s*true", "nvml_measure_pcie_speeds = false", mod)
-        mod = re.sub(r'shown_gpus\s*=\s*"[^"]*"', 'shown_gpus = "intel"', mod)
+        mod = re.sub(r'shown_gpus\s*=\s*"[^"]*"', f'shown_gpus = "{igpu_target}"', mod)
         if mod != text:
             conf.write_text(mod)
-            return True, "Optimized ~/.config/btop/btop.conf to monitor iGPU only."
+            return True, f"Optimized ~/.config/btop/btop.conf to monitor iGPU ({igpu_target}) only."
         return True, "btop.conf is already optimized."
     except Exception as e:
         return False, f"Failed to modify btop.conf: {e}"
+
+
+def fix_persistence_mode() -> Tuple[bool, str]:
+    subprocess.run(["nvidia-smi", "-pm", "0"], capture_output=True, check=False)
+    res = subprocess.run(["systemctl", "is-active", "nvidia-persistenced.service"], capture_output=True, text=True)
+    if res.stdout.strip() == "active":
+        sudo = ["sudo", "-n"] if subprocess.run(["sudo", "-n", "true"], capture_output=True).returncode == 0 else (["pkexec"] if os.environ.get("DISPLAY") or os.environ.get("WAYLAND_DISPLAY") else ["sudo"])
+        subprocess.run(sudo + ["systemctl", "stop", "nvidia-persistenced.service"], capture_output=True, check=False)
+        subprocess.run(sudo + ["systemctl", "disable", "nvidia-persistenced.service"], capture_output=True, check=False)
+        return True, "Stopped and disabled nvidia-persistenced.service"
+    return True, "Persistence mode is disabled"
 
 
 def fix_compositor_env() -> List[Tuple[bool, str]]:

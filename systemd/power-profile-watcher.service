@@ -4,7 +4,7 @@ After=graphical-session.target
 
 [Service]
 Type=simple
-ExecStart=/bin/bash -c 'exec upower --monitor | while read -r line; do if echo "$line" | grep -q "line_power_ADP0"; then %h/.local/bin/power-profile-switch auto; fi; done'
+ExecStart=/bin/bash -c 'exec upower --monitor | while read -r line; do if echo "$line" | grep -E -q "line_power|battery|ac"; then %h/.local/bin/power-profile-switch auto; fi; done'
 Restart=on-failure
 RestartSec=5
 

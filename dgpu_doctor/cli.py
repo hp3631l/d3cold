@@ -14,6 +14,7 @@ from .remediate import (
     are_system_rules_installed,
     fix_btop,
     fix_compositor_env,
+    fix_persistence_mode,
     fix_system_rules,
     install_prime_run,
     suspend_dgpu,
@@ -48,7 +49,12 @@ def cmd_audit(_args: argparse.Namespace) -> int:
 
 def cmd_fix(args: argparse.Namespace) -> int:
     print(f"\n{B}{C}=== Applying d3cold Remediations ==={E}\n")
-    for name, fn in [("PCI Power Control", apply_live_power_control), ("Terminal Monitor", fix_btop), ("Game Offloader", install_prime_run)]:
+    for name, fn in [
+        ("PCI Power Control", apply_live_power_control),
+        ("Persistence Mode", fix_persistence_mode),
+        ("Terminal Monitor", fix_btop),
+        ("Game Offloader", install_prime_run),
+    ]:
         ok, msg = fn()
         icon = f"{G}✓{E}" if ok else f"{R}✗{E}"
         print(f"[{icon}] {name}: {msg}")
